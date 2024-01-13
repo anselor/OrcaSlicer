@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "name": "AnkerMake Generic PETG @base",
+    "inherits": "fdm_filament_pctg",
+    "from": "system",
+    "filament_id": "GFH00",
+    "instantiation": "false",
+}

@@ -1,0 +1,13 @@
+{
+    "type": "filament",
+    "name": "AnkerMake Generic PCTG",
+    "inherits": "AnkerMake Generic PCTG @base",
+    "from": "system",
+    "setting_id": "GFSH00",
+    "instantiation": "true",
+    "compatible_printers": [
+        "AnkerMake M5 PTFE 0.4 nozzle",
+        "AnkerMake M5 All-Metal 0.4 nozzle",
+        "AnkerMake M5c 0.4 nozzle"
+    ]
+}
