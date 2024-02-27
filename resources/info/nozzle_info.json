@@ -1,6 +1,8 @@
 {
     "version": "1.0.0.1",
     "nozzle_hrc": {
+        "pcd": 80,
+        "obxidian": 80,
         "hardened_steel": 55,
         "stainless_steel": 20,
         "brass": 2,
