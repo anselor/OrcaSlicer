@@ -30,6 +30,14 @@ CoolingBuffer::CoolingBuffer(GCode &gcodegen) : m_config(gcodegen.config()), m_t
     }
 }
 
+unsigned int CoolingBuffer::resolve_filament_id(unsigned int physical_tool) const
+{
+    const std::vector<int> &tool_filament_map = m_config.tool_filament_map.values;
+    if (physical_tool < tool_filament_map.size() && tool_filament_map[physical_tool] > 0)
+        return static_cast<unsigned int>(tool_filament_map[physical_tool] - 1);
+    return physical_tool;
+}
+
 void CoolingBuffer::reset(const Vec3d &position)
 {
     // BBS: add I and J axis to store center of arc
@@ -500,6 +508,9 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(sline.data() + m_toolchange_prefix.size(), sline.data() + sline.size(), new_extruder);
             if (std::errc::invalid_argument != ret.ec) {
+                // Mapped printers put the physical tool number here; translate to the filament id
+                // the per-extruder_adjustments below are actually keyed by.
+                new_extruder = resolve_filament_id(new_extruder);
                 // Only change extruder in case the number is meaningful. User could provide an out-of-range index through custom gcodes -
                 // those shall be ignored.
                 if (new_extruder < map_extruder_to_per_extruder_adjustment.size()) {
@@ -883,6 +894,9 @@ std::string CoolingBuffer::apply_layer_cooldown(
             unsigned int new_extruder = 0;
             auto ret = std::from_chars(line_start + m_toolchange_prefix.size(), line_end, new_extruder);
             if (std::errc::invalid_argument != ret.ec) {
+                // Same physical-tool -> filament-id translation as parse_layer_gcode: EXTRUDER_CONFIG
+                // below indexes per-filament fan settings by m_current_extruder, not by tool number.
+                new_extruder = resolve_filament_id(new_extruder);
                 if (new_extruder != m_current_extruder) {
                     m_current_extruder = new_extruder;
                     change_extruder_set_fan(true);

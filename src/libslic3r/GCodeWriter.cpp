@@ -286,6 +286,12 @@ std::string GCodeWriter::set_temperature(unsigned int temperature, bool wait, in
     // set tool to -1 to make sure we won't emit T parameter for single extruder or SEMM
     if (!this->multiple_extruders || m_single_extruder_multi_material)
         tool = -1;
+    // Mapped printers: callers pass filament indices; the T/P param must be the physical tool.
+    if (tool >= 0 && this->config.enable_filament_mapping.value && !is_bbl_printers()) {
+        tool = (int) get_extruder_index(this->config, (unsigned int) tool);
+        if (tool < (int) this->config.physical_extruder_map.size())
+            tool = this->config.physical_extruder_map.get_at(tool);
+    }
     return set_temperature(temperature, this->config.gcode_flavor, wait, tool);
 }
 
@@ -685,6 +691,15 @@ std::string GCodeWriter::toolchange_prefix() const
 
 std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
 {
+    // Capture the physical tool in effect before this call reassigns it, so a same-tool swap on a
+    // mapped printer can be detected below.
+    int prev_extruder_id = m_curr_extruder_id;
+    // Orca: also capture the previous *filament* (not just the physical tool) before
+    // m_curr_filament_extruder[prev_extruder_id] gets overwritten below (same-tool swaps reuse the
+    // same slot), so a merged transition can be detected for the trailing reset_e suppression.
+    int prev_filament_id = (prev_extruder_id != -1 && this->filament((size_t) prev_extruder_id) != nullptr)
+        ? (int) this->filament((size_t) prev_extruder_id)->id() : -1;
+
     // set the new extruder
     auto filament_extruder_iter = Slic3r::lower_bound_by_predicate(m_filament_extruders.begin(), m_filament_extruders.end(), [filament_id](const Extruder &e) { return e.id() < filament_id; });
     assert(filament_extruder_iter != m_filament_extruders.end() && filament_extruder_iter->id() == filament_id);
@@ -697,18 +712,49 @@ std::string GCodeWriter::toolchange(unsigned int filament_id, int nozzle_id)
     std::ostringstream gcode;
     // Orca: also emit for non-BBL single-extruder multi-filament setups (MMU-style).
     if (this->multiple_extruders || (this->config.filament_diameter.values.size() > 1 && !is_bbl_printers())) {
-        // Orca: manual filament change keeps its tag line even on BBL machines, so the
-        // M1020 form must not shadow it. nozzle_id is signed: the null-safe nozzle
-        // lookup legitimately yields -1 ("no specific nozzle"), matching the literal
-        // H-1 the stock change templates emit; an unsigned would wrap.
-        if (m_is_bbl_printers && !config.manual_filament_change)
-            gcode << "M1020 S" << filament_id << " H" << nozzle_id;
-        else
-            gcode << this->toolchange_prefix() << filament_id;
-        if (GCodeWriter::full_gcode_comment)
-            gcode << " ; change extruder";
-        gcode << "\n";
-        gcode << this->reset_e(true);
+        // Opted-in mapped printers address physical tools; the firmware knows nothing
+        // about filament indices. m_curr_extruder_id was resolved above via filament_map.
+        bool mapped_active = this->config.enable_filament_mapping.value && !m_is_bbl_printers &&
+            this->multiple_extruders && !m_single_extruder_multi_material;
+        // Orca: same-tool filament swap - the physical tool doesn't change, so there is no T-command
+        // to (re)select. GCode::set_extruder emits the FILAMENT_CHANGE tag and filament_swap_gcode
+        // for this case instead; here we only need to refresh the extruder's E-state.
+        bool same_tool_swap = mapped_active && prev_extruder_id != -1 && prev_extruder_id == m_curr_extruder_id;
+        if (!same_tool_swap) {
+            // Orca: manual filament change keeps its tag line even on BBL machines, so the
+            // M1020 form must not shadow it. nozzle_id is signed: the null-safe nozzle
+            // lookup legitimately yields -1 ("no specific nozzle"), matching the literal
+            // H-1 the stock change templates emit; an unsigned would wrap.
+            if (m_is_bbl_printers && !config.manual_filament_change)
+                gcode << "M1020 S" << filament_id << " H" << nozzle_id;
+            else {
+                unsigned int tool_number = filament_id;
+                if (mapped_active) {
+                    tool_number = m_curr_extruder_id;
+                    if (tool_number < this->config.physical_extruder_map.size())
+                        tool_number = (unsigned int) this->config.physical_extruder_map.get_at(tool_number);
+                }
+                gcode << this->toolchange_prefix() << tool_number;
+            }
+            if (GCodeWriter::full_gcode_comment)
+                gcode << " ; change extruder";
+            gcode << "\n";
+            // Orca: emit FILAMENT_CHANGE tag immediately after T<physical> on mapped printers.
+            // This makes tool activations self-describing: processor no longer depends on
+            // tool_filament_map inversion to know which filament is active. Particularly
+            // important when multiple filaments share a tool; the tag carries the actual
+            // filament id, not a guess from ascending-ID inversion.
+            if (mapped_active) {
+                gcode << ";" << GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Filament_Change) << "F" << (int)filament_id << "\n";
+            }
+        }
+        // Orca: a merged transition (same physical filament id + same tool, see merged_transition)
+        // needs zero g-code, including this trailing E-reset -- nothing moved, so there is nothing
+        // to reset. T-line suppression above already holds for merged pairs via same_tool_swap
+        // (they're same-tool by definition), this only extends the suppression to reset_e.
+        bool merged = prev_filament_id >= 0 && merged_transition(this->config, (unsigned int) prev_filament_id, filament_id);
+        if (!merged)
+            gcode << this->reset_e(true);
     }
     return gcode.str();
 }

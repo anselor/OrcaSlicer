@@ -7,6 +7,7 @@
 #include "format.hpp"
 
 #include "GCode/Thumbnails.hpp"
+#include <algorithm>
 #include <set>
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -103,6 +104,42 @@ size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id)
     return 0;
 }
 
+bool filament_mapping_enabled(const ConfigBase& printer_config)
+{
+    const ConfigOption* opt = printer_config.option("enable_filament_mapping");
+    if (opt == nullptr || !opt->getBool())
+        return false;
+    const ConfigOptionFloats* nozzle_diameter = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzle_diameter == nullptr || nozzle_diameter->size() < 2)
+        return false;
+    const ConfigOption* semm = printer_config.option("single_extruder_multi_material");
+    return semm == nullptr || !semm->getBool();
+}
+
+bool merged_transition(const GCodeConfig& config, unsigned int from, unsigned int to)
+{
+    if (!filament_mapping_enabled(config))
+        return false;
+    const std::vector<int>& physical_map = config.filament_physical_map.values;
+    if (from >= physical_map.size() || to >= physical_map.size())
+        return false;
+    int physical_from = physical_map[from];
+    if (physical_from <= 0 || physical_from != physical_map[to])
+        return false;
+    return get_extruder_index(config, from) == get_extruder_index(config, to);
+}
+
+void normalize_plate_filament_map(std::vector<int>& values, size_t filament_count, size_t nozzle_count)
+{
+    // Empty means "fall back to the global filament_map" (see PartPlate::get_real_filament_maps);
+    // leave that semantic alone instead of padding it into a real per-plate map.
+    if (values.empty())
+        return;
+    if (values.size() < filament_count)
+        values.resize(filament_count, 1);
+    for (int& v : values)
+        v = std::clamp(v, 1, std::max((int) nozzle_count, 1));
+}
 
 // Orca: input shaping values types by flavor
 std::vector<std::string> get_shaper_type_values_for_flavor(GCodeFlavor flavor)
@@ -2813,6 +2850,16 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Filament map to extruder.");
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts{1});
+
+    // Per project filament, the stable id of the physical filament it resolves to (0 =
+    // unassigned). A genuine per-plate user input (set by the physical-filament matching
+    // dialog), not engine-derived state: it round-trips through .3mf plate metadata
+    // (physical_filament_maps) and must diff/invalidate normally like filament_map.
+    def = this->add("filament_physical_map", coInts);
+    def->label = "Filament map to physical filament";
+    def->tooltip = "Filament map to physical filament.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts{});
 
     // Multi-nozzle: per-filament map to the config slot identified by (extruder, nozzle_volume_type).
     // Engine-internal per-filament slot map: recomputed at apply time from filament_map (plus the
@@ -6509,6 +6556,20 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("enable_filament_mapping", coBool);
+    def->label = L("Decouple filaments from tools");
+    def->tooltip = L("Allow defining more filament profiles than the printer has tools. "
+                     "Before slicing each plate, a dialog maps the filaments used on that plate "
+                     "to physical tools, and the G-code uses the mapped tool numbers. "
+                     "Only for multi-tool printers without single-extruder multi-material.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("tool_filament_map", coInts);
+    def->label = "";  // engine-derived, never shown in UI
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts());
+
     def = this->add("wipe_tower_type", coEnum);
     def->label = L("Wipe tower type");
     def->tooltip = L("Choose the wipe tower implementation for multi-material prints. Type 1 is recommended for Bambu and Qidi printers with a filament cutter. Type 2 offers better compatibility with multi-tool and MMU printers and provide overall better compatibility.");
@@ -7237,6 +7298,20 @@ void PrintConfigDef::init_fff_params()
     def->height = 5;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString());
+
+    def = this->add("filament_swap_gcode", coString);
+    def->label = L("Filament swap G-code");
+    def->tooltip = L("G-code inserted when the next filament is serviced by the SAME physical tool "
+                     "as the current one (a manual or MMU-style swap), instead of a tool change. "
+                     "Typically M600 or PAUSE, or a vendor swap macro. "
+                     "Placeholders previous_filament_id, next_filament_id and next_extruder "
+                     "(the shared physical tool) are available. "
+                     "Only used when filament-to-tool mapping is enabled.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 12;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("change_extrusion_role_gcode", coString);
     def->label = L("Change extrusion role G-code");

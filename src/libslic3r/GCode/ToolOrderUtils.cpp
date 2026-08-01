@@ -1137,16 +1137,23 @@ namespace Slic3r
         //only when layer filament num <= 5,we do forcast
         constexpr int max_n_with_forcast = 5;
         int cost = 0;
-        std::vector<std::unordered_set<unsigned int>>groups(2); //save the grouped filaments
-        std::vector<std::vector<std::vector<unsigned int>>> layer_sequences(2); //save the reordered filament sequence by group
+        // Orca: one group per physical tool/nozzle - flush_matrix is sized to nozzle count by the
+        // caller (BBL dual-nozzle: 2; opted-in mapped printers: however many tools they have), and
+        // filament_maps holds 0-based tool indices into that same range. Groups used to be
+        // hard-coded to exactly 2 (matching BBL's only supported case at the time), so any
+        // filament_maps value >= 2 - reachable once opted-in non-BBL multi-tool printers started
+        // feeding this function their real tool map instead of an all-zero identity map - joined no
+        // group and silently never got emitted. size() reduces to 2 for every existing BBL caller,
+        // so their output is unchanged.
+        size_t num_groups = std::max<size_t>(2, flush_matrix.size());
+        std::vector<std::unordered_set<unsigned int>>groups(num_groups); //save the grouped filaments
+        std::vector<std::vector<std::vector<unsigned int>>> layer_sequences(num_groups); //save the reordered filament sequence by group
         std::map<size_t, std::vector<unsigned int>> custom_layer_sequence_map; // save the filament sequences of custom layer
 
         // group the filament
         for (int i = 0; i < filament_maps.size(); ++i) {
-            if (filament_maps[i] == 0)
-                groups[0].insert(filament_lists[i]);
-            if (filament_maps[i] == 1)
-                groups[1].insert(filament_lists[i]);
+            if (filament_maps[i] >= 0 && static_cast<size_t>(filament_maps[i]) < num_groups)
+                groups[filament_maps[i]].insert(filament_lists[i]);
         }
 
         // store custom layer sequence
@@ -1264,41 +1271,56 @@ namespace Slic3r
             filament_sequences->clear();
             filament_sequences->resize(layer_filaments.size());
             int last_group_id = 0;
+
+            auto group_of_filament = [&groups](unsigned int filament) -> int {
+                for (size_t g = 0; g < groups.size(); ++g)
+                    if (groups[g].count(filament))
+                        return static_cast<int>(g);
+                return 0; // not grouped (shouldn't happen for a used filament); default to group 0
+            };
+
             //if last_group == 0,print group 0 first ,else print group 1 first
             if (!custom_layer_sequence_map.empty()) {
                 const auto& first_layer = custom_layer_sequence_map.begin()->first;
                 const auto& first_layer_filaments = custom_layer_sequence_map.begin()->second;
                 assert(!first_layer_filaments.empty());
 
-                bool first_group = groups[0].count(first_layer_filaments.front()) ? 0 : 1;
-                last_group_id = (first_layer & 1) ? !first_group : first_group;
+                int first_group = group_of_filament(first_layer_filaments.front());
+                // The 2-group case round-robins strictly every layer (both groups are normally used
+                // every layer), so the group that should seed layer 0 is found by parity of how many
+                // layers precede the first custom layer. That toggle has no equivalent past 2 groups
+                // (there's no single "other" group to flip to), so N>2 just seeds from the first
+                // custom layer's own starting group instead. This only affects which group's
+                // filaments print first at a custom-layer boundary - the round-robin below still
+                // visits every group every layer, so it can never drop a filament.
+                if (num_groups == 2)
+                    last_group_id = (first_layer & 1) ? !first_group : first_group;
+                else
+                    last_group_id = first_group;
             }
 
             for (size_t layer = 0; layer < layer_filaments.size(); ++layer) {
                 auto& curr_layer_seq = (*filament_sequences)[layer];
                 if (custom_layer_sequence_map.find(layer) != custom_layer_sequence_map.end()) {
                     curr_layer_seq = custom_layer_sequence_map[layer];
-                    if (!curr_layer_seq.empty()) {
-                        last_group_id = groups[0].count(curr_layer_seq.back()) ? 0 : 1;
-                    }
+                    if (!curr_layer_seq.empty())
+                        last_group_id = group_of_filament(curr_layer_seq.back());
                     continue;
                 }
-                if (last_group_id == 1) {
-                    // try reuse the last group
-                    if (!layer_sequences[1].empty() && !layer_sequences[1][layer].empty())
-                        curr_layer_seq.insert(curr_layer_seq.end(), layer_sequences[1][layer].begin(), layer_sequences[1][layer].end());
-                    if (!layer_sequences[0].empty() && !layer_sequences[0][layer].empty()) {
-                        curr_layer_seq.insert(curr_layer_seq.end(), layer_sequences[0][layer].begin(), layer_sequences[0][layer].end());
-                        last_group_id = 0; // update last group id
-                    }
-                }
-                else if(last_group_id == 0) {
-                    if (!layer_sequences[0].empty() && !layer_sequences[0][layer].empty()) {
-                        curr_layer_seq.insert(curr_layer_seq.end(), layer_sequences[0][layer].begin(), layer_sequences[0][layer].end());
-                    }
-                    if (!layer_sequences[1].empty() && !layer_sequences[1][layer].empty()) {
-                        curr_layer_seq.insert(curr_layer_seq.end(), layer_sequences[1][layer].begin(), layer_sequences[1][layer].end());
-                        last_group_id = 1; // update last group id
+                // Round-robin starting at the last group used, wrapping through every group exactly
+                // once. The rotation's starting point is frozen before the loop: updating
+                // last_group_id as groups are appended (needed so the *next* layer resumes from the
+                // right place) must not also perturb *this* layer's remaining offsets, or a later
+                // offset can alias back onto an already-visited group_id (duplicating it) while
+                // never reaching the group it should have (dropping it). Reduces to the previous
+                // hard-coded 2-group logic exactly for num_groups == 2, and now also visits groups
+                // 2..N-1 for opted-in multi-tool printers instead of silently skipping them.
+                size_t start_group_id = static_cast<size_t>(last_group_id);
+                for (size_t offset = 0; offset < num_groups; ++offset) {
+                    size_t group_id = (start_group_id + offset) % num_groups;
+                    if (!layer_sequences[group_id].empty() && !layer_sequences[group_id][layer].empty()) {
+                        curr_layer_seq.insert(curr_layer_seq.end(), layer_sequences[group_id][layer].begin(), layer_sequences[group_id][layer].end());
+                        last_group_id = static_cast<int>(group_id);
                     }
                 }
             }

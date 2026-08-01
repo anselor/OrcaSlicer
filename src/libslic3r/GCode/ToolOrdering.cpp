@@ -1945,6 +1945,57 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::build_sequential_group_
     return result ? *result : MultiNozzleUtils::LayeredNozzleGroupResult();
 }
 
+// R3.4: merged filaments (same physical filament id, sharing one tool) must print contiguously
+// within every layer. Zero flush alone does not guarantee this -- a uniform matrix, a custom
+// sequence (first-layer no-reorder, other_layers_print_sequence, Cyclic ordering), or DP
+// tie-breaking can all still interleave a distinct same-tool filament between a merged pair's
+// members. This stable-partitions each merged group's members adjacent to the group's first
+// occurrence in the layer, preserving the relative order of everything else.
+//
+// Defensive: a merged pair (same physical id) that resolves to two DIFFERENT tools is a hostile/
+// inconsistent config (filament_physical_map disagreeing with filament_map) -- physically they
+// cannot be adjacent without a real tool change, so the pair is treated as NOT merged here; the
+// mismatch is logged once, not per occurrence.
+static void make_merged_groups_contiguous(std::vector<std::vector<unsigned int>>& filament_sequences, const Print* print)
+{
+    if (!print)
+        return;
+    static bool warned_mismatched_merge = false;
+    for (auto& seq : filament_sequences) {
+        if (seq.size() < 2)
+            continue;
+        std::vector<unsigned int> result;
+        result.reserve(seq.size());
+        std::vector<bool> placed(seq.size(), false);
+        for (size_t i = 0; i < seq.size(); ++i) {
+            if (placed[i])
+                continue;
+            placed[i] = true;
+            unsigned int fil = seq[i];
+            result.push_back(fil);
+            for (size_t j = i + 1; j < seq.size(); ++j) {
+                if (placed[j])
+                    continue;
+                unsigned int other = seq[j];
+                if (!print->is_merged_pair(fil, other))
+                    continue;
+                if (print->get_extruder_id(fil) != print->get_extruder_id(other)) {
+                    if (!warned_mismatched_merge) {
+                        BOOST_LOG_TRIVIAL(warning) << "Filaments " << fil << " and " << other
+                            << " share a physical filament id but are mapped to different tools; "
+                               "ignoring the merge for tool-ordering contiguity.";
+                        warned_mismatched_merge = true;
+                    }
+                    continue;
+                }
+                placed[j] = true;
+                result.push_back(other);
+            }
+        }
+        seq = std::move(result);
+    }
+}
+
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first_layer)
 {
     const PrintConfig* print_config = m_print_config_ptr;
@@ -1985,6 +2036,19 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
             for (auto& v : vec)
                 v *= flush_multiplies[nozzle_id];
         }
+    }
+
+    // R3.4: filaments merged to the same physical filament id need no flush between them at
+    // all -- zero both directions of the pair in the matrix that feeds both the flush-minimizing
+    // reorder DP below and the GUI flush-stat cache (calc_filament_change_info_by_toolorder).
+    // Empty filament_physical_map (BBL / pre-R3 projects) means is_merged_pair is always false,
+    // so this loop is a no-op for that fleet.
+    if (filament_mapping_enabled(*print_config)) {
+        for (size_t nozzle_id = 0; nozzle_id < nozzle_nums; ++nozzle_id)
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                for (unsigned int j = 0; j < number_of_extruders; ++j)
+                    if (i != j && m_print->is_merged_pair(i, j))
+                        nozzle_flush_mtx[nozzle_id][i][j] = 0.f;
     }
 
     std::vector<int>filament_maps(number_of_extruders, 0);
@@ -2165,13 +2229,26 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume(bool reorder_first
     if (!dynamic_reorder) {
         reorder_filaments_for_minimum_flush_volume(
             filament_lists,
-            m_print->is_BBL_printer() ? filament_maps : maps_without_group, // non-bbl printers do not support filament group yet
+            // Opted-in non-BBL printers group like BBL multi-extruder machines; other
+            // non-BBL printers keep the ungrouped ordering (their map is identity anyway).
+            (m_print->is_BBL_printer() || print_config->enable_filament_mapping.value) ? filament_maps : maps_without_group,
             layer_filaments,
             nozzle_flush_mtx,
             get_custom_seq,
             &filament_sequences
         );
     }
+
+    // R3.4: force merged-group contiguity per layer. Covers both branches above -- the dynamic
+    // (per-combo-range selector) branch fills filament_sequences directly (~:2089-2091), and the
+    // static branch fills it via the reorder call just above -- so a single post-pass here, before
+    // the flush-stat caches read filament_sequences below, applies to either producer.
+    // Gated on filament_mapping_enabled: is_merged_pair itself is a lower-level physical-id check
+    // that stays reachable under a disabled/SEMM mapping (see Print::is_merged_pair), so this call
+    // site -- which reorders the actual print schedule, not just a purge-volume lookup -- must not
+    // let a stale filament_physical_map silently reorder filaments once mapping is off.
+    if (filament_mapping_enabled(*print_config))
+        make_merged_groups_contiguous(filament_sequences, m_print);
 
     // The three-mode flush-stat caches are now computed from the nozzle-aware grouping result via the
     // nozzle-aware calc_filament_change_info_by_toolorder. Stats are GUI-only (surfaced by

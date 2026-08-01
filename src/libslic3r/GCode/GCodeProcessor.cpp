@@ -76,7 +76,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     " WIPE_TOWER_END",
     " PA_CHANGE:",
     "@PRINT_TIME_SEC@",
-    "@USED_FILAMENT_LENGTH@"
+    "@USED_FILAMENT_LENGTH@",
+    " FILAMENT_CHANGE "
 };
 
 const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
@@ -99,7 +100,8 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags_compatible = {
     " WIPE_TOWER_END",
     " PA_CHANGE:",
     "@PRINT_TIME_SEC@",
-    "@USED_FILAMENT_LENGTH@"
+    "@USED_FILAMENT_LENGTH@",
+    " FILAMENT_CHANGE "
 };
 
 
@@ -3042,6 +3044,13 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
         std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
     }
 
+    m_tool_filament_map.clear();
+    if (const ConfigOptionBool* mapping_enabled = config.option<ConfigOptionBool>("enable_filament_mapping");
+        mapping_enabled != nullptr && mapping_enabled->value) {
+        if (const ConfigOptionInts* tool_filaments = config.option<ConfigOptionInts>("tool_filament_map"))
+            m_tool_filament_map = tool_filaments->values;
+    }
+
     const ConfigOptionBool* spiral_vase = config.option<ConfigOptionBool>("spiral_mode");
     if (spiral_vase != nullptr) {
         m_detect_layer_based_on_tag = spiral_vase->value;
@@ -3232,6 +3241,13 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
     if (filament_maps != nullptr) {
         m_filament_maps = filament_maps->values;
         std::transform(m_filament_maps.begin(), m_filament_maps.end(), m_filament_maps.begin(), [](int value) {return value - 1; });
+    }
+
+    m_tool_filament_map.clear();
+    if (const ConfigOptionBool* mapping_enabled = config.option<ConfigOptionBool>("enable_filament_mapping");
+        mapping_enabled != nullptr && mapping_enabled->value) {
+        if (const ConfigOptionInts* tool_filaments = config.option<ConfigOptionInts>("tool_filament_map"))
+            m_tool_filament_map = tool_filaments->values;
     }
 
     //BBS
@@ -4268,6 +4284,18 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
             if (boost::starts_with(tool_change_cmd, "T")) {
                 process_T(tool_change_cmd);
             }
+        }
+        // Orca: same-tool filament swap tag - a filament change that never re-selects the tool
+        // (see GCode::set_extruder). The physical tool doesn't change, so there is no T-command to
+        // parse; drive the filament attribution directly off the "F<id>" payload.
+        if (boost::starts_with(comment, reserved_tag(ETags::Filament_Change))) {
+            std::string_view id_str = comment.substr(reserved_tag(ETags::Filament_Change).length());
+            if (boost::starts_with(id_str, "F")) {
+                int id = 0;
+                if (parse_number(id_str.substr(1), id) && id >= 0 && id < m_result.filaments_count)
+                    process_filament_change(id, -1);
+            }
+            return;
         }
     }
 
@@ -6578,6 +6606,10 @@ void GCodeProcessor::process_T(const std::string_view command, int nozzle_id)
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
         }
         else {
+            // Mapped printers emit physical tool numbers; translate back to the filament id
+            // the statistics and color model are keyed by.
+            if (!m_tool_filament_map.empty() && eid < m_tool_filament_map.size() && m_tool_filament_map[eid] > 0)
+                eid = (unsigned int) (m_tool_filament_map[eid] - 1);
             if (eid >= m_result.filaments_count) {
                 BOOST_LOG_TRIVIAL(error) << "Invalid T command (" << command << ").";
                 return;

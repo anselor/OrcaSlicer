@@ -1037,6 +1037,13 @@ public:
     std::vector<int> get_filament_nozzle_maps() const;
     // get the group label of filament
     size_t get_extruder_id(unsigned int filament_id) const;
+    // R3.4: true iff filaments a and b (0-based) resolve to the SAME physical filament id (>0)
+    // via m_config.filament_physical_map. False when either is unassigned (0/absent) or out of
+    // range -- merged filaments need no swap gcode/tool change/purge between them.
+    // Note: a==a is trivially true (a filament always shares its own physical id with itself);
+    // callers must not read that as "a self-transition requires no-op handling" -- it's just the
+    // reflexive case of "same material," not a statement about any transition existing at all.
+    bool is_merged_pair(unsigned int a, unsigned int b) const;
 
     // The region every extruder can reach,
     // i.e. the intersection of all per-extruder printable areas. Falls back to the full printable_area
@@ -1342,6 +1349,15 @@ private:
 
     std::vector<unsigned int> m_slice_used_filaments;
     std::vector<unsigned int> m_slice_used_filaments_first_layer;
+
+    // Orca: used-filament count from the most recent apply()'s post-rebuild (accurate) pass.
+    // apply()'s EARLY normalize_fdm_2() call unavoidably runs before this apply's PrintObjects/
+    // regions are rebuilt, so `this->extruders(true)` there still reflects the PREVIOUS apply.
+    // Reading this cached value instead keeps that early call consistent with what the LATE,
+    // post-rebuild pass will (re)compute for an otherwise-unchanged model+config, instead of
+    // oscillating between "stale" and "accurate" every other apply and spuriously invalidating
+    // a just-finished slice (enable_prime_tower / independent_support_layer_height flip-flop).
+    size_t m_last_known_used_filament_count {0};
 
     //BBS: plate's origin
     Vec3d   m_origin {0, 0, 0};

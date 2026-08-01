@@ -386,6 +386,42 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         return ok;
     }
 
+    // The tool number a T-command in custom gcode would actually need to match: on mapped printers
+    // the writer emits the physical tool (see GCodeWriter::toolchange), not the filament id, so
+    // custom_gcode_changes_tool must be asked about the same number space or a user's own "T<n>"
+    // line looks like it never changed the tool.
+    // Same predicate as the mapped_active gate in GCodeWriter::toolchange, expressed against the
+    // caller-visible writer/config so callers can tell whether a discarded toolchange_command
+    // would have carried a FILAMENT_CHANGE tag (see custom_gcode_changes_tool call sites).
+    static bool writer_mapped_active(const GCodeWriter& writer, const PrintConfig& config)
+    {
+        return config.enable_filament_mapping.value && !writer.is_bbl_printers() &&
+            writer.multiple_extruders && !config.single_extruder_multi_material.value;
+    }
+
+    static unsigned int writer_tool_number(const GCodeWriter& writer, const PrintConfig& config, unsigned int filament_id)
+    {
+        if (writer_mapped_active(writer, config)) {
+            unsigned int tool_number = (unsigned int) get_extruder_index(config, filament_id);
+            if (tool_number < config.physical_extruder_map.size())
+                tool_number = (unsigned int) config.physical_extruder_map.get_at(tool_number);
+            return tool_number;
+        }
+        return filament_id;
+    }
+
+    // Orca: the FILAMENT_CHANGE tag comment for filament_id, matching the construction used by
+    // GCodeWriter::toolchange and the same_tool_swap branches below.
+    static std::string filament_change_tag(unsigned int filament_id)
+    {
+        return ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Filament_Change) + "F" + std::to_string(filament_id) + "\n";
+    }
+
+    // merged_transition (a null transition between two filaments sharing a physical filament id and
+    // tool) lives in PrintConfig.cpp/.hpp next to get_extruder_index: GCodeWriter::toolchange needs
+    // it too (to suppress the trailing reset_e for a merged pair) and GCodeWriter.cpp doesn't include
+    // GCode.hpp, so a GCode.cpp-local helper couldn't be shared there.
+
     std::string OozePrevention::pre_toolchange(GCode& gcodegen)
     {
         std::string gcode;
@@ -1082,18 +1118,37 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
         end_filament_gcode_str = toolchange_retract_str + object_end_label_temp + end_filament_gcode_str;
 
+        // Orca: same-tool filament swap on a mapped printer - the physical tool doesn't change, so
+        // change_filament_gcode (whose job is to select a tool) doesn't apply here. Mirrors the
+        // same_tool_swap predicate in GCode::set_extruder. The tower's purge toolpath (emitted by
+        // the caller around this function, from tcr_rotated_gcode) still runs unconditionally -
+        // only the tool-select macro is replaced by filament_swap_gcode below.
+        int probe_old_filament_id = gcodegen.writer().filament() ? (int) gcodegen.writer().filament()->id() : -1;
+        bool same_tool_swap = filament_mapping_enabled(*m_print_config) && probe_old_filament_id != -1 &&
+            new_filament_id >= 0 && (unsigned int) probe_old_filament_id != (unsigned int) new_filament_id &&
+            get_extruder_index(*m_print_config, (unsigned int) probe_old_filament_id) ==
+                get_extruder_index(*m_print_config, (unsigned int) new_filament_id);
+
         std::string wipe_next_start_point_str;
         bool        need_travel_after_change_filament_gcode = false; // travel need be after the filament changed to get the correct "m_curr_extruder_id"
-        if (! change_filament_gcode.empty()) {
+        if (! change_filament_gcode.empty() || same_tool_swap) {
             DynamicConfig config;
-            int old_filament_id = gcodegen.writer().filament() ? (int)gcodegen.writer().filament()->id() : -1;
+            int old_filament_id = probe_old_filament_id;
             int old_extruder_id = gcodegen.writer().filament() ? (int)gcodegen.writer().filament()->extruder_id() : -1;
             // Logical nozzle ids for old/new filament (null-safe -> extruder id).
             int old_nozzle_id  = nozzle_id_for_gcode_placeholder(group_result, old_filament_id, old_extruder_id, m_layer_idx);
             int next_nozzle_id = nozzle_id_for_gcode_placeholder(group_result, new_filament_id, new_extruder_id, m_layer_idx);
 
-            config.set_key_value("previous_extruder", new ConfigOptionInt(old_filament_id));
-            config.set_key_value("next_extruder", new ConfigOptionInt(new_filament_id));
+            int prev_placeholder_id = old_filament_id;
+            int next_placeholder_id = (int) new_filament_id;
+            if (filament_mapping_enabled(*m_print_config)) {
+                if (prev_placeholder_id >= 0)
+                    prev_placeholder_id = (int) get_extruder_index(*m_print_config, (unsigned int) prev_placeholder_id);
+                next_placeholder_id = (int) get_extruder_index(*m_print_config, new_filament_id);
+            }
+            config.set_key_value("previous_extruder", new ConfigOptionInt(prev_placeholder_id));
+            config.set_key_value("next_extruder", new ConfigOptionInt(next_placeholder_id));
+            config.set_key_value("previous_filament_id", new ConfigOptionInt(old_filament_id));
             // current_hotend/next_hotend (see hotend_id_for_gcode_placeholder): multi-nozzle H2C -> -1
             // (static; dynamic branch dormant), X2D -> -1, existing printers -> extruder id.
             config.set_key_value("current_hotend", new ConfigOptionInt(
@@ -1276,7 +1331,16 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     config.set_key_value(key_value, new ConfigOptionFloat(0.f));
                 }
             }
-            toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_filament_id, &config);
+            if (same_tool_swap) {
+                toolchange_gcode_str = ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Filament_Change) + "F" + std::to_string(new_filament_id) + "\n";
+                const std::string &filament_swap_gcode = gcodegen.m_config.filament_swap_gcode.value;
+                if (!filament_swap_gcode.empty()) {
+                    std::string swap_gcode_parsed = gcodegen.placeholder_parser_process("filament_swap_gcode", filament_swap_gcode, new_filament_id, &config);
+                    check_add_eol(swap_gcode_parsed);
+                    toolchange_gcode_str += swap_gcode_parsed;
+                }
+            } else
+                toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_filament_id, &config);
 
             check_add_eol(toolchange_gcode_str);
 
@@ -1303,10 +1367,16 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             // non-multi-nozzle paths (the helper falls back to the extruder id).
             toolchange_command = gcodegen.writer().toolchange(new_filament_id,
                 nozzle_id_for_gcode_placeholder(group_result, new_filament_id, new_extruder_id, m_layer_idx));
-        if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(), new_filament_id))
+        if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(),
+                                        writer_tool_number(gcodegen.writer(), *m_print_config, new_filament_id)))
             toolchange_gcode_str += toolchange_command;
         else {
             // We have informed the m_writer about the current extruder_id, we can ignore the generated G-code.
+            // Orca: ...except the discarded toolchange_command is the only carrier of the
+            // FILAMENT_CHANGE tag for this cross-tool activation. Re-emit just the tag after the
+            // custom gcode's own T. same_tool_swap already tagged itself further up.
+            if (!same_tool_swap && writer_mapped_active(gcodegen.writer(), *m_print_config))
+                toolchange_gcode_str += filament_change_tag(new_filament_id);
         }
 
         if (need_travel_after_change_filament_gcode) {
@@ -1418,7 +1488,8 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         gcode += tcr_gcode;
         // Count the toolchange only when the emitted block really changed the tool —
         // tower visits without a filament change must not advance the ordinal.
-        if (custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), new_filament_id))
+        if (custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(),
+                                       writer_tool_number(gcodegen.writer(), *m_print_config, new_filament_id)))
             gcodegen.m_toolchange_count++;
         check_add_eol(toolchange_gcode_str);
 
@@ -1956,6 +2027,32 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         if ((m_enable_timelapse_print || m_enable_wrapping_detection) && m_is_first_print) {
             return false;
         }
+
+        // Orca: a merged transition (see merged_transition) never got a plan_toolchange entry from
+        // Print::_make_wipe_tower's planning loops (they skip it while still advancing their own
+        // current-filament cursor), so this predicate must independently recognize the same
+        // transition and report "empty" *before* touching m_tool_change_idx / m_tool_changes below --
+        // otherwise the bounds check a few lines down would consume (or misread) the tcr meant for a
+        // later, real transition. tool_change() (the actual consumer/advancer) is only invoked by its
+        // caller when this returns false (GCode.cpp ~:6142), so keeping this predicate in lockstep
+        // with the planner is sufficient; tool_change() itself needs no separate merged guard.
+        // The throw immediately below (GCode.cpp:1955, "Wipe tower generation failed...") is the
+        // failure mode if this predicate and the planner's skip logic ever disagree.
+        //
+        // finish_layer does NOT except this: Print::_make_wipe_tower's planning loop (the
+        // "R3.5" comment at Print.cpp ~4216) never calls plan_toolchange for a merged transition
+        // even when it's the layer's last extruder, so there is no reserved tcr slot for this
+        // arrival to consume regardless of finish_layer -- falling through here would instead
+        // consume (and desynchronize the cursor for) whatever tcr the planner queued for a later,
+        // unrelated transition, which is worse than the sparse-layer gap this would try to avoid
+        // (verified: doing so throws "WipeTowerIntegration::append_tcr was asked to do a
+        // toolchange it didn't expect" against the merged-pair prime-tower test). The caller
+        // (process_layer) still runs GCode::set_extruder's merged-transition bookkeeping/tag for
+        // this pair regardless of finish_layer, so the writer state and FILAMENT_CHANGE tag stay
+        // correct even though no tower gcode is emitted for it.
+        if (gcodegen.writer().filament() != nullptr &&
+            merged_transition(gcodegen.config(), gcodegen.writer().filament()->id(), (unsigned int) extruder_id))
+            return true;
 
         if (gcodegen.writer().need_toolchange(extruder_id) || finish_layer) {
             if (!(size_t(m_tool_change_idx) < m_tool_changes[m_layer_idx].size()))
@@ -6269,7 +6366,20 @@ LayerResult GCode::process_layer(
 
         std::string gcode_toolchange;
         if (has_wipe_tower) {
-            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_tools.extruders.back())) {
+            bool finish_layer_extruder = extruder_id == layer_tools.extruders.back();
+            // Orca: a merged transition (see merged_transition) that the tower planner skipped
+            // (Print::_make_wipe_tower) or that is_empty_wipe_tower_gcode reports as empty still
+            // needs GCode::set_extruder's merged early-return run for its bookkeeping/tag -- no
+            // other code path updates the writer's current filament, placeholders, or emits the
+            // FILAMENT_CHANGE tag for this pair when the tower is on. Must run before
+            // is_empty_wipe_tower_gcode/tool_change so they still observe the pre-transition
+            // filament id for their own merged detection.
+            bool is_merged_arrival = writer().filament() != nullptr &&
+                merged_transition(m_config, writer().filament()->id(), (unsigned int) extruder_id);
+            bool tower_gcode_empty = m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, finish_layer_extruder);
+            if (is_merged_arrival)
+                gcode_toolchange += this->set_extruder(extruder_id, print_z);
+            if (!tower_gcode_empty) {
                 if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode
                     && !(m_farthest_point_timelapse.enabled && m_farthest_point_timelapse.farthest_is_photo_head)) {
                     bool should_insert = true;
@@ -6297,7 +6407,7 @@ LayerResult GCode::process_layer(
                     gcode += insert_wrapping_detection_gcode();
                     has_insert_wrapping_detection_gcode = true;
                 }
-                gcode_toolchange = m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_tools.extruders.back());
+                gcode_toolchange += m_wipe_tower->tool_change(*this, extruder_id, finish_layer_extruder);
             }
         } else {
             // Same case-A/case-B split for the non-wipe-tower path. With the subsystem off,
@@ -8989,6 +9099,44 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
         return gcode;
     }
 
+    // Orca: a null transition between two filaments merged to the same physical filament id and
+    // tool (merged_transition) -- modeled on the single-extruder early return above, but for the
+    // multi-extruder/mapped case. Emits nothing except the FILAMENT_CHANGE tag: no retract/wipe
+    // reset, no filament_end/start gcode, no ooze prevention, no change/swap gcode, no temperature
+    // or pressure-advance reset, and neither m_toolchange_count nor m_last_pos_defined are touched
+    // (this early-return runs before both). The wipe tower's plan_toolchange skip / is_empty_wipe_tower_gcode
+    // must stay in exact lockstep with this predicate -- WipeTowerIntegration::is_empty_wipe_tower_gcode's
+    // positional tcr-cursor throw (GCode.cpp:1955, "Wipe tower generation failed...")
+    // is the failure mode if they ever disagree.
+    {
+        int old_filament_id = m_writer.filament() != nullptr ? (int) m_writer.filament()->id() : m_start_gcode_filament;
+        if (old_filament_id >= 0 && merged_transition(m_config, (unsigned int) old_filament_id, new_filament_id)) {
+            auto        group_result   = m_print->get_layered_nozzle_group_result();
+            int         next_nozzle_id = nozzle_id_for_gcode_placeholder(group_result, (int) new_filament_id, new_extruder_id, m_layer_index);
+            std::string discarded      = m_writer.toolchange(new_filament_id, next_nozzle_id);
+            (void) discarded; // null transition: nothing to emit for the writer's own T-line either
+            if (Extruder *fil = m_writer.filament())
+                fil->set_config_index((int) get_filament_config_index((int) fil->id()));
+            m_start_gcode_filament = -1;
+
+            this->placeholder_parser().set("current_extruder", new_filament_id);
+            this->placeholder_parser().set("current_hotend",
+                hotend_id_for_gcode_placeholder(m_config, group_result, (int) new_filament_id, new_extruder_id, m_layer_index));
+            this->placeholder_parser().set("current_filament_id", (int) new_filament_id);
+            this->placeholder_parser().set("current_extruder_id", new_extruder_id);
+            this->placeholder_parser().set("current_nozzle_id", next_nozzle_id);
+            {
+                size_t fi = get_filament_config_index(new_filament_id);
+                this->placeholder_parser().set("retraction_distance_when_cut", m_config.retraction_distances_when_cut.get_at(fi));
+                this->placeholder_parser().set("long_retraction_when_cut", m_config.long_retractions_when_cut.get_at(fi));
+                this->placeholder_parser().set("retraction_distance_when_ec", m_config.retraction_distances_when_ec.get_at(fi));
+                this->placeholder_parser().set("long_retraction_when_ec", m_config.long_retractions_when_ec.get_at(fi));
+            }
+
+            return filament_change_tag(new_filament_id);
+        }
+    }
+
     // BBS. Should be placed before retract.
     m_toolchange_count++;
 
@@ -9054,6 +9202,15 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     if (m_writer.filament() != nullptr || m_start_gcode_filament != -1) {
         std::vector<float> flush_matrix(cast<float>(get_flush_volumes_matrix(m_config.flush_volumes_matrix.values, new_extruder_id, m_config.nozzle_diameter.values.size())));
         const unsigned int number_of_extruders = (unsigned int) (m_config.filament_colour.values.size()); // if is multi_extruder only use the fist extruder matrix
+        // R3.5: this direct/no-tower toolchange flush is a third is_merged_pair-relevant site
+        // (besides Print.cpp's two wipe-tower matrices and ToolOrdering.cpp's reorder-DP matrix),
+        // but zeroing it drives wipe_volume/wipe_length to exactly 0, which sends
+        // flush_count = round(wipe_volume / g_purge_volume_one_time) to 0 a few lines below
+        // (~:9081) and flush_unit = wipe_length / flush_count into a 0/0 divide -- reproducibly
+        // hangs the slice. Left alone: R3.5's merged-transition early return above (right after
+        // the single-extruder return, before m_toolchange_count++) makes this moot for merged
+        // pairs -- that branch returns before this code is ever reached, so this site never runs
+        // for a merged transition and the 0/0 hazard is unreachable for that case.
         if (m_writer.filament() != nullptr)
             assert(m_writer.filament()->id() < number_of_extruders);
         else
@@ -9111,8 +9268,16 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     int  next_nozzle_id = nozzle_id_for_gcode_placeholder(group_result, (int) new_filament_id, new_extruder_id, m_layer_index);
     DynamicConfig dyn_config;
     dyn_config.set_key_value("outer_wall_volumetric_speed", new ConfigOptionFloat(outer_wall_volumetric_speed));
-    dyn_config.set_key_value("previous_extruder", new ConfigOptionInt(old_filament_id));
-    dyn_config.set_key_value("next_extruder", new ConfigOptionInt((int)new_filament_id));
+    int prev_placeholder_id = old_filament_id;
+    int next_placeholder_id = (int) new_filament_id;
+    if (filament_mapping_enabled(m_config)) {
+        if (prev_placeholder_id >= 0)
+            prev_placeholder_id = (int) get_extruder_index(m_config, (unsigned int) prev_placeholder_id);
+        next_placeholder_id = (int) get_extruder_index(m_config, new_filament_id);
+    }
+    dyn_config.set_key_value("previous_extruder", new ConfigOptionInt(prev_placeholder_id));
+    dyn_config.set_key_value("next_extruder", new ConfigOptionInt(next_placeholder_id));
+    dyn_config.set_key_value("previous_filament_id", new ConfigOptionInt(old_filament_id));
     // current_hotend/next_hotend (see hotend_id_for_gcode_placeholder): multi-nozzle H2C -> -1
     // (static; dynamic branch dormant), X2D -> -1, existing printers -> extruder id.
     dyn_config.set_key_value("current_hotend", new ConfigOptionInt(
@@ -9237,6 +9402,14 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
         dyn_config.set_key_value(key_value, new ConfigOptionFloat(0.f));
     }
 
+    // Orca: a same-tool filament swap on a mapped printer - the physical tool doesn't change, so
+    // there is nothing for change_filament_gcode (whose job is to select a tool) to do. Emit the
+    // lighter filament_swap_gcode behind a FILAMENT_CHANGE tag instead. GCodeWriter::toolchange
+    // (called further down) independently detects the same condition and suppresses its T line.
+    bool same_tool_swap = filament_mapping_enabled(m_config) && old_filament_id != -1 &&
+        (unsigned int) old_filament_id != new_filament_id &&
+        get_extruder_index(m_config, (unsigned int) old_filament_id) == get_extruder_index(m_config, new_filament_id);
+
     // Process the custom change_filament_gcode.
     std::string change_filament_gcode = m_config.change_filament_gcode.value;
 
@@ -9244,8 +9417,29 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     change_filament_gcode = this->retract(false, false, LiftType::SpiralLift, true) + change_filament_gcode;
 
     std::string toolchange_gcode_parsed;
+    if (same_tool_swap) {
+        dyn_config.set_key_value("toolchange_z", new ConfigOptionFloat(print_z));
+        gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Filament_Change) + "F" + std::to_string(new_filament_id) + "\n";
+        const std::string &filament_swap_gcode = m_config.filament_swap_gcode.value;
+        if (!filament_swap_gcode.empty()) {
+            toolchange_gcode_parsed = placeholder_parser_process("filament_swap_gcode", filament_swap_gcode, new_filament_id, &dyn_config);
+            check_add_eol(toolchange_gcode_parsed);
+            gcode += toolchange_gcode_parsed;
+        }
+        // Orca: filament_swap_gcode is as arbitrary as change_filament_gcode (e.g. an M600/PAUSE
+        // that parks the head) - mirror the safeguards the change_filament_gcode branch below
+        // applies, matching what the tower's same_tool_swap path already does unconditionally.
+        gcode += ";_FORCE_RESUME_FAN_SPEED\n";
+        m_writer.set_current_position_clear(false);
+        double temp_z_after_tool_change;
+        if (GCodeProcessor::get_last_z_from_gcode(toolchange_gcode_parsed, temp_z_after_tool_change)) {
+            Vec3d pos = m_writer.get_position();
+            pos(2) = temp_z_after_tool_change;
+            m_writer.set_position(pos);
+        }
+    }
     //Orca: Ignore change_filament_gcode if is the first call for a tool change and manual_filament_change is enabled
-    if (!change_filament_gcode.empty() && !(m_config.manual_filament_change.value && m_toolchange_count == 1)) {
+    else if (!change_filament_gcode.empty() && !(m_config.manual_filament_change.value && m_toolchange_count == 1)) {
         dyn_config.set_key_value("toolchange_z", new ConfigOptionFloat(print_z));
 
         toolchange_gcode_parsed = placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_filament_id, &dyn_config);
@@ -9279,10 +9473,17 @@ std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bo
     std::string toolchange_command = m_writer.toolchange(new_filament_id, next_nozzle_id);
     if (Extruder *fil = m_writer.filament())
         fil->set_config_index((int)get_filament_config_index((int)fil->id()));
-    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), new_filament_id))
+    if (!custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(),
+                                    writer_tool_number(m_writer, m_config, new_filament_id)))
         gcode += toolchange_command;
     else {
         // user provided his own toolchange gcode, no need to do anything
+        // Orca: ...except that toolchange_command (discarded above) is the only place the
+        // FILAMENT_CHANGE tag would have been emitted for this cross-tool activation. Re-emit
+        // just the tag after the custom gcode's own T so the processor still knows which
+        // filament this tool now carries. same_tool_swap already tagged itself further up.
+        if (!same_tool_swap && writer_mapped_active(m_writer, m_config))
+            gcode += filament_change_tag(new_filament_id);
     }
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)

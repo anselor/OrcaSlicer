@@ -510,6 +510,7 @@ class Print;
             PA_Change,
             Print_Time_Sec_Placeholder,
             Used_Filament_Length_Placeholder,
+            Filament_Change,
         };
 
         static const std::string& reserved_tag(ETags tag) { return s_IsBBLPrinter ? Reserved_Tags[static_cast<unsigned char>(tag)] : Reserved_Tags_compatible[static_cast<unsigned char>(tag)]; }
@@ -1144,6 +1145,7 @@ class Print;
         float m_pressure_advance;
         ExtrusionRole m_extrusion_role;
         std::vector<int> m_filament_maps;
+        std::vector<int> m_tool_filament_map; // 1-based filament per physical tool; empty = no mapping
         std::vector<unsigned char> m_last_filament_id;
         std::vector<unsigned char> m_filament_id;
         unsigned char m_extruder_id;

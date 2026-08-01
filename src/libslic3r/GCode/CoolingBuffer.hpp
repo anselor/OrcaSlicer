@@ -30,6 +30,12 @@ public:
 
 private:
 	CoolingBuffer& operator=(const CoolingBuffer&) = delete;
+    // Mapped printers emit physical tool numbers in T commands, but the per-material cooling
+    // settings (slow-down time, fan speed, ...) are keyed by filament id. Translates the former to
+    // the latter via the same tool_filament_map config option GCodeProcessor::process_T inverts
+    // physical tool -> filament with. A no-op (returns physical_tool unchanged) when the map is
+    // empty or doesn't cover this tool, so single-tool and unmapped multi-tool printers are unaffected.
+    unsigned int resolve_filament_id(unsigned int physical_tool) const;
     std::vector<PerExtruderAdjustments> parse_layer_gcode(const std::string &gcode, std::vector<float> &current_pos) const;
     float       calculate_layer_slowdown(std::vector<PerExtruderAdjustments> &per_extruder_adjustments);
     // Apply slow down over G-code lines stored in per_extruder_adjustments, enable fan if needed.

@@ -347,6 +347,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "extruder_nozzle_stats"
             || opt_key == "filament_map_mode"
             || opt_key == "filament_map"
+            || opt_key == "filament_physical_map"
             || opt_key == "filament_nozzle_map"
             || opt_key == "filament_volume_map"
             || opt_key == "filament_adhesiveness_category"
@@ -1310,6 +1311,79 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 add_warning(ret);
             }else
                 return ret;
+        }
+    }
+
+    if (filament_mapping_enabled(m_config)) {
+        const size_t tool_count = m_config.nozzle_diameter.values.size();
+
+        // Orca R3.4: a filament's "demand" on a tool is per DISTINCT physical filament id, not
+        // per project filament -- filaments merged to the same physical id (is_merged_pair)
+        // share a tool with no swap gcode needed between them, so they only cost one demand
+        // slot together. A filament with no physical id (0/absent) is never merged with
+        // anything else, including other unassigned filaments, so each costs its own slot; when
+        // filament_physical_map is empty/all-zero (pre-R3 projects, CLI slicing), this makes
+        // every used filament distinct, reproducing R2 behavior exactly.
+        auto physical_id_of = [this](unsigned int filament_id) -> int {
+            const std::vector<int>& physical_map = m_config.filament_physical_map.values;
+            return filament_id < physical_map.size() ? physical_map[filament_id] : 0;
+        };
+
+        // Mode-independent check: if overflow (more distinct demand slots than tools) occurs
+        // and no swap gcode is configured, fail with actionable message.
+        // This applies to both auto-flush and manual modes, since the engine co-locates
+        // excess filaments on shared tools; without swap gcode, set_extruder can't swap
+        // between them and the print will silently keep extruding the wrong filament.
+        {
+            std::unordered_set<int> merged_groups_seen;
+            size_t distinct_demand = 0;
+            for (unsigned int filament_id : this->extruders(true)) {
+                const int physical_id = physical_id_of(filament_id);
+                if (physical_id > 0) {
+                    if (merged_groups_seen.insert(physical_id).second)
+                        ++distinct_demand;
+                } else {
+                    ++distinct_demand;
+                }
+            }
+            if (distinct_demand > tool_count && m_config.filament_swap_gcode.value.empty())
+                return { L("This plate maps multiple filaments to one tool, which requires a swap G-code. "
+                          "Set 'Filament swap G-code' in Printer settings -> Custom G-code (e.g. M600), "
+                          "or assign the filaments to different tools."), nullptr };
+        }
+
+        // The strict per-map checks below only make sense once fmmManual has actually been
+        // committed (by the mapping dialog at slice time, or loaded from a stored 3MF plate).
+        // Before that, filament_map still holds its default (all-1s) and the engine resolves
+        // grouping via ToolOrdering's non-manual path instead of reading this map, so treating
+        // the default map as if it were a real (colliding) assignment here would reject plates
+        // that are actually sliceable and would disable the slice button before the user could
+        // ever reach the dialog that fixes it.
+        if (m_config.filament_map_mode == FilamentMapMode::fmmManual) {
+            std::vector<int> tool_users(tool_count, 0);          // 1-based filament occupying each tool
+            std::vector<int> tool_physical_ids(tool_count, 0);   // physical id of tool_users' filament (0 = unassigned)
+            for (unsigned int filament_id : this->extruders(true)) {
+                if (filament_id >= m_config.filament_map.values.size())
+                    return { L("Filament mapping is enabled but the filament-to-tool map is incomplete. "
+                               "Re-slice the plate and assign every used filament to a tool."), nullptr };
+                const size_t tool = get_extruder_index(m_config, filament_id);
+                if (tool >= tool_count)
+                    return { L("A filament is mapped to a tool this printer does not have."), nullptr };
+                const int physical_id = physical_id_of(filament_id);
+                // Orca: two used filaments sharing a tool is legal once filament_swap_gcode is set,
+                // or once they merge to the same physical filament (is_merged_pair) -- GCode emits
+                // no swap gcode, tool change, or purge between members of a merged group.
+                // Distinct physical ids (or unassigned) sharing a tool still require swap_gcode as
+                // before; GCode::set_extruder swaps between them in place instead of reselecting the
+                // tool (see the FILAMENT_CHANGE tag emission).
+                const bool merged_with_tool = tool_users[tool] != 0 && physical_id > 0 && physical_id == tool_physical_ids[tool];
+                if (tool_users[tool] != 0 && !merged_with_tool && m_config.filament_swap_gcode.value.empty())
+                    return { L("This plate maps multiple filaments to one tool, which requires a swap G-code. "
+                              "Set 'Filament swap G-code' in Printer settings -> Custom G-code (e.g. M600), "
+                              "or assign the filaments to different tools."), nullptr };
+                tool_users[tool] = (int) filament_id + 1;
+                tool_physical_ids[tool] = physical_id;
+            }
         }
     }
 
@@ -3447,6 +3521,30 @@ void Print::update_filament_maps_to_config(std::vector<int> f_maps, std::vector<
         }
     }
     update_filament_self_index_cache();
+
+    // Fallback inversion for mapped non-BBL printers: per physical tool, the FIRST used filament.
+    // GCodeWriter::toolchange emits FILAMENT_CHANGE tags on every T<physical> (for mapped printers),
+    // making tool activations self-describing. This map is now a fallback ONLY for tag-less T commands
+    // (user custom gcode, legacy files). When tags are present (normal path), processor reads the tag,
+    // not this map. Semantics: keep the FIRST assignment per tool (ascending-ID order), so the map
+    // correctly records the lowest-ID filament on each tool as a safe default. Known limitation:
+    // tag-less T commands cannot recover from print-order divergence where a higher-ID filament
+    // actually prints first on a shared tool; with tags, this is corrected automatically.
+    if (m_config.enable_filament_mapping.value && !is_BBL_printer()) {
+        std::vector<int> tool_filaments(m_config.nozzle_diameter.values.size(), 0);
+        for (unsigned int filament_id : this->extruders(true)) {
+            size_t tool = get_extruder_index(m_config, filament_id);
+            if (tool < tool_filaments.size() && tool_filaments[tool] == 0)
+                tool_filaments[tool] = (int) filament_id + 1;
+        }
+        m_config.tool_filament_map.values = tool_filaments;
+        // Also carry it on the config snapshot the g-code's embedded config block is dumped from
+        // (GCode::append_full_config reads print.full_print_config()) -- otherwise a G-code
+        // re-import (GCodeProcessor::process_file's OrcaSlicer-producer path) would reload an
+        // empty map and lose the physical-tool -> filament inversion.
+        m_full_print_config.option<ConfigOptionInts>("tool_filament_map", true)->values = tool_filaments;
+    }
+
     m_has_auto_filament_map_result = true;
 }
 
@@ -3709,6 +3807,25 @@ size_t Print::get_extruder_id(unsigned int filament_id) const
         return filament_map[filament_id] - 1;
     }
     return 0;
+}
+
+bool Print::is_merged_pair(unsigned int a, unsigned int b) const
+{
+    // Orca: deliberately NOT gated on filament_mapping_enabled here -- this predicate is a
+    // lower-level physical-id-overlap check reused by defensive call sites (e.g. wipe-tower
+    // purge-zeroing, tool-ordering contiguity) that must keep working even when
+    // filament_mapping_enabled() reports false (single_extruder_multi_material=1, or the option
+    // off) because a hostile/stale filament_physical_map is still reachable in that state -- see
+    // "A physical-id merge claim across different tools does not suppress a real cross-tool purge"
+    // in test_multifilament.cpp. Callers that must not fire under a disabled/SEMM mapping gate on
+    // filament_mapping_enabled() themselves at the call site instead (see the O(n^2) zeroing loops
+    // in this file and in ToolOrdering.cpp, and merged_transition in PrintConfig.cpp for the
+    // actual gcode-emission path).
+    const std::vector<int>& physical_map = m_config.filament_physical_map.values;
+    if (a >= physical_map.size() || b >= physical_map.size())
+        return false;
+    const int physical_a = physical_map[a];
+    return physical_a > 0 && physical_a == physical_map[b];
 }
 
 // Region reachable by every extruder = intersection of all per-extruder printable areas.
@@ -4083,6 +4200,18 @@ void Print::_make_wipe_tower()
             multi_extruder_flush.emplace_back(wipe_volumes);
         }
 
+        // R3.4: filaments merged to the same physical filament id purge 0 in both directions at
+        // the tower -- they're the same physical material under two ids. Empty
+        // filament_physical_map (BBL / pre-R3 projects) makes is_merged_pair always false, so
+        // this is a no-op for that fleet.
+        if (filament_mapping_enabled(m_config)) {
+            for (auto& per_nozzle_flush : multi_extruder_flush)
+                for (unsigned int i = 0; i < number_of_extruders; ++i)
+                    for (unsigned int j = 0; j < number_of_extruders; ++j)
+                        if (i != j && this->is_merged_pair(i, j))
+                            per_nozzle_flush[i][j] = 0.f;
+        }
+
         // Per-carousel-slot purge tracking via NozzleStatusRecorder (BBS pattern); the layered
         // group result set on the tower above resolves each filament to its nozzle slot per layer.
         MultiNozzleUtils::NozzleStatusRecorder nozzle_recorder;
@@ -4110,6 +4239,37 @@ void Print::_make_wipe_tower()
             for (const auto filament_id : layer_tools.extruders) {
                 if (filament_id == current_filament_id)
                     continue;
+
+                // R3.5: a merged transition (same physical filament id + same tool -- see
+                // merged_transition in GCode.cpp/GCodeWriter.cpp) gets no plan_toolchange entry at
+                // all (matching GCode::set_extruder's early return and
+                // WipeTowerIntegration::is_empty_wipe_tower_gcode's skip), but the cursor still
+                // advances so later transitions purge against the right "previous" filament. This
+                // must stay in exact lockstep with is_empty_wipe_tower_gcode's own merged check --
+                // GCode.cpp:1955's positional tcr-cursor throw ("Wipe tower generation failed...")
+                // is the failure mode if the two ever disagree. That check is built on
+                // merged_transition(), which is gated on filament_mapping_enabled, so the same
+                // gate applies here.
+                if (filament_mapping_enabled(m_config) &&
+                    this->is_merged_pair(current_filament_id, filament_id) &&
+                    this->get_extruder_id(current_filament_id) == this->get_extruder_id(filament_id)) {
+                    // Still update the recorder's "last filament in this nozzle" bookkeeping to the
+                    // NEW filament id (mirroring the real-transition path below), even though no
+                    // plan_toolchange is requested here. The merge zeroing above only cleared the
+                    // flush cells for this exact pair ([i][j]/[j][i]); it never equalized the merged
+                    // partners' full outbound rows, and flush_volumes_matrix is free-form user data,
+                    // so rows can genuinely diverge. A later REAL transition's lookup must see the
+                    // filament that's actually now loaded (the new merged member), not its stale
+                    // pre-merge predecessor, or that transition's purge volume is read from the
+                    // wrong row.
+                    {
+                        auto nozzle_info = nozzle_group_result.get_nozzle_for_filament(filament_id, layer_idx);
+                        if (nozzle_info)
+                            nozzle_recorder.set_nozzle_status(nozzle_info->group_id, filament_id, nozzle_info->extruder_id);
+                    }
+                    current_filament_id = filament_id;
+                    continue;
+                }
 
                 float volume_to_purge = 0;
 
@@ -4228,15 +4388,47 @@ void Print::_make_wipe_tower()
         for (unsigned int i = 0; i<number_of_extruders; ++i)
             wipe_volumes.push_back(std::vector<float>(flush_matrix.begin()+i*number_of_extruders, flush_matrix.begin()+(i+1)*number_of_extruders));
 
-        // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume
-        if ((!m_config.purge_in_prime_tower || !m_config.single_extruder_multi_material) && is_wipe_tower_type2) {
+        // Orca: itertate over wipe_volumes and change the non-zero values to the prime_volume.
+        // Mapped printers (non-SEMM, filament->tool mapping enabled) are an exception for
+        // same-tool filament pairs: those pairs are a color-only swap on one physical tool, so
+        // the flush matrix is the correct purge source, same as SEMM. Cross-tool pairs on a
+        // mapped printer keep today's flat-prime_volume behavior (a real tool change already
+        // purges via the toolchange itself; the matrix isn't calibrated for that path).
+        bool mapping_enabled_for_matrix = filament_mapping_enabled(m_config);
+        std::vector<int> filament_maps_for_matrix = mapping_enabled_for_matrix ? this->get_filament_maps() : std::vector<int>();
+        if (!m_config.purge_in_prime_tower && is_wipe_tower_type2) {
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                for (unsigned int j = 0; j < number_of_extruders; ++j)
+                    if (wipe_volumes[i][j] > 0)
+                        wipe_volumes[i][j] = m_config.prime_volume;
+        } else if (!m_config.single_extruder_multi_material && is_wipe_tower_type2) {
             for (unsigned int i = 0; i < number_of_extruders; ++i) {
                 for (unsigned int j = 0; j < number_of_extruders; ++j) {
-                    if (wipe_volumes[i][j] > 0) {
+                    if (wipe_volumes[i][j] <= 0)
+                        continue;
+                    bool same_tool = mapping_enabled_for_matrix && i < filament_maps_for_matrix.size() && j < filament_maps_for_matrix.size()
+                        && filament_maps_for_matrix[i] == filament_maps_for_matrix[j];
+                    if (!same_tool)
                         wipe_volumes[i][j] = m_config.prime_volume;
-                    }
                 }
             }
+        }
+        // R3.4: merged filaments (same physical filament id) always purge 0 in both directions at
+        // the tower, overriding whatever the same-tool/flat-prime_volume logic above set -- this
+        // runs after it, regardless of mapping/single_extruder_multi_material state. Unlike the
+        // other two flush-zeroing sites (ToolOrdering.cpp's per-nozzle nozzle_flush_mtx and this
+        // function's Type1 multi_extruder_flush, both indexed/looked-up per physical nozzle so a
+        // merged-but-different-tool pair is never actually read from the zeroed cell), this matrix
+        // is flat over all filaments and IS read for genuine cross-tool transitions (the same-tool
+        // scoping above deliberately keeps a real purge for those). So a hostile config -- same
+        // physical id claimed by filament_physical_map, but different tools in filament_map,
+        // reachable since validation doesn't reject it -- must not be zeroed here: that would
+        // silently drop the purge on an actual tool change. Gate on tool match.
+        if (filament_mapping_enabled(m_config)) {
+            for (unsigned int i = 0; i < number_of_extruders; ++i)
+                for (unsigned int j = 0; j < number_of_extruders; ++j)
+                    if (i != j && this->is_merged_pair(i, j) && this->get_extruder_id(i) == this->get_extruder_id(j))
+                        wipe_volumes[i][j] = 0.f;
         }
         // Initialize the wipe tower.
         WipeTower2 wipe_tower(m_config, m_default_region_config, m_plate_index, m_origin, wipe_volumes,
@@ -4265,8 +4457,34 @@ void Print::_make_wipe_tower()
                 for (const auto extruder_id : layer_tools.extruders) {
                     if ((first_layer && extruder_id == m_wipe_tower_data.tool_ordering.all_extruders().back()) || extruder_id !=
                         current_extruder_id) {
+                        // R3.5: a merged transition (same physical filament id + same tool -- see
+                        // merged_transition in GCode.cpp/GCodeWriter.cpp) gets no plan_toolchange entry
+                        // at all (matching GCode::set_extruder's early return and
+                        // WipeTowerIntegration::is_empty_wipe_tower_gcode's skip), but the cursor still
+                        // advances so later transitions purge against the right "previous" filament
+                        // (this loop's flush lookup is keyed directly off current_extruder_id, not a
+                        // separate nozzle-bookkeeping structure, so advancing the cursor alone keeps it
+                        // correct). Guarded on extruder_id != current_extruder_id so the forced
+                        // first-layer entry (the other half of the || above) always still gets its
+                        // plan_toolchange call. Must stay in exact lockstep with
+                        // is_empty_wipe_tower_gcode's own merged check -- GCode.cpp:1955's positional
+                        // tcr-cursor throw ("Wipe tower generation failed...") is the failure mode if
+                        // the two ever disagree. That check is built on merged_transition(), which is
+                        // gated on filament_mapping_enabled, so the same gate applies here.
+                        if (extruder_id != current_extruder_id && filament_mapping_enabled(m_config) &&
+                            this->is_merged_pair(current_extruder_id, extruder_id) &&
+                            this->get_extruder_id(current_extruder_id) == this->get_extruder_id(extruder_id)) {
+                            current_extruder_id = extruder_id;
+                            continue;
+                        }
+
                         float volume_to_wipe = m_config.prime_volume;
-                        if (m_config.purge_in_prime_tower && m_config.single_extruder_multi_material) {
+                        // Same-tool pairs on a mapped printer read the flush matrix too (see the
+                        // matching widening above); cross-tool pairs keep the flat prime_volume.
+                        bool same_tool_mapped_pair = mapping_enabled_for_matrix
+                            && current_extruder_id < filament_maps_for_matrix.size() && extruder_id < filament_maps_for_matrix.size()
+                            && filament_maps_for_matrix[current_extruder_id] == filament_maps_for_matrix[extruder_id];
+                        if (m_config.purge_in_prime_tower && (m_config.single_extruder_multi_material || same_tool_mapped_pair)) {
                             volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id]; // total volume to wipe after this toolchange
                             volume_to_wipe *= m_config.flush_multiplier.get_at(0);
                             // Not all of that can be used for infill purging:

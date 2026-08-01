@@ -1520,6 +1520,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                required_nozzle_HRC))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
+    ((ConfigOptionInts,                filament_physical_map)) // per project filament, the id of the physical filament it resolves to (0 = unassigned)
     ((ConfigOptionInts,                filament_volume_map))
     ((ConfigOptionInts,                filament_nozzle_map))
     ((ConfigOptionInts,                filament_map_2)) //used for multi nozzle, map filament to the index identified by extruder+nozzle_volume_type
@@ -1582,10 +1583,16 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             filament_start_gcode))
     ((ConfigOptionBool,                single_extruder_multi_material))
     ((ConfigOptionBool,                manual_filament_change))
+    ((ConfigOptionBool,                enable_filament_mapping))
+    // Derived at slice time, never user input: per physical tool, the 1-based id of the
+    // used filament mapped to it on this plate (0 = no filament). Lets GCodeProcessor
+    // attribute physical T commands back to filaments.
+    ((ConfigOptionInts,                tool_filament_map))
     ((ConfigOptionBool,                single_extruder_multi_material_priming))
     ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
+    ((ConfigOptionString,              filament_swap_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
     ((ConfigOptionString,              process_change_extrusion_role_gcode))
     ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))
@@ -2392,6 +2399,25 @@ static void set_flush_volumes_matrix(std::vector<T> &out_matrix, const std::vect
 }
 
 size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id);
+
+// True when this printer decouples filament profiles from physical tools
+// (multi-tool, non-SEMM, opted in via enable_filament_mapping).
+bool filament_mapping_enabled(const ConfigBase& printer_config);
+
+// True when filaments `from` and `to` resolve to the same physical filament (filament_physical_map)
+// AND the same tool (get_extruder_index) -- a null transition that needs zero g-code between the two
+// logical filaments. Mirrors Print::is_merged_pair combined with the get_extruder_id equality gate the
+// wipe-tower flush-zeroing sites use: a physical-id merge claim across different tools is a reachable
+// hostile config and must NOT be treated as a null transition. filament_physical_map is empty on BBL /
+// pre-R3 projects, so this is always false there (option-off byte-identical). Shared by GCode.cpp
+// (set_extruder, is_empty_wipe_tower_gcode) and GCodeWriter.cpp (toolchange's reset_e suppression).
+bool merged_transition(const GCodeConfig& config, unsigned int from, unsigned int to);
+
+// Normalize a per-plate filament_map loaded from a 3mf against the project's own
+// filament/nozzle counts: pad (never truncate) short maps with 1, clamp every entry
+// into [1, nozzle_count], and leave an empty map empty (see PartPlate::get_real_filament_maps,
+// where an empty per-plate map means "use the global filament_map").
+void normalize_plate_filament_map(std::vector<int>& values, size_t filament_count, size_t nozzle_count);
 
 } // namespace Slic3r
 
