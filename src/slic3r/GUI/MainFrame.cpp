@@ -2232,9 +2232,14 @@ bool MainFrame::get_enable_slice_status()
     }
     else if (m_slice_select == eSlicePlate)
     {
+        // Opted-in filament-mapping printers ask the user to (re)confirm the mapping on every
+        // slice (see try_pop_up_before_slice); disabling the button once a valid result exists
+        // would trap the user with no way back into that dialog. Keep it clickable so the
+        // mapping dialog is always reachable, matching the eSliceAll "always enable" behavior.
         if (current_plate->is_slice_result_valid())
         {
-            enable = false;
+            if (!filament_mapping_enabled(wxGetApp().preset_bundle->printers.get_edited_preset().config))
+                enable = false;
         }
         else if (!current_plate->can_slice())
         {

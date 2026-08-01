@@ -542,6 +542,11 @@ public:
     void publish_job_finished(wxCommandEvent& evt);
     void open_platesettings_dialog(wxCommandEvent& evt);
     void open_filament_map_setting_dialog(wxCommandEvent &evt);
+    // Orca: persistent entry point back into the pre-slice row-mode mapping dialog (see
+    // try_pop_up_before_slice) for opted-in filament-mapping printers; operates on the current
+    // plate and invalidates its slice result on a confirmed change so the next slice re-applies
+    // the new mapping. Used by the sidebar "Map filaments to tools..." button.
+    void open_filament_map_dialog_for_current_plate();
     void on_change_color_mode(SimpleEvent& evt);
 	void eject_drive();
 

@@ -182,6 +182,8 @@
 #include "../Utils/OrcaCloudServiceAgent.hpp"
 #include "StepMeshDialog.hpp"
 #include "FilamentMapDialog.hpp"
+#include "FilamentInventoryEditor.hpp"
+#include "FilamentInventoryStore.hpp"
 #include "CloneDialog.hpp"
 #include "PurgeModeDialog.hpp"
 
@@ -735,6 +737,12 @@ struct Sidebar::priv
     ScalableButton* m_printer_connect = nullptr;
     ScalableButton* m_printer_bbl_sync = nullptr;
     ScalableButton* m_printer_setting = nullptr;
+    // Orca: opens FilamentInventoryEditor; only shown for opted-in non-SEMM multi-tool printers
+    // (filament_mapping_enabled), see Sidebar::show_SEMM_buttons.
+    ScalableButton* m_printer_inventory = nullptr;
+    // Orca: reopens the row-mode filament-map dialog for the current plate post-slice; same
+    // visibility gating as m_printer_inventory, see Sidebar::show_SEMM_buttons.
+    ScalableButton* m_printer_filament_map = nullptr;
     wxStaticText *  m_text_printer_settings = nullptr;
     wxPanel* m_panel_printer_content = nullptr;
     // Filament Track Switch status overlay: an icon floated over the left/single extruder AMS area,
@@ -2438,6 +2446,28 @@ Sidebar::Sidebar(Plater *parent)
             wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_PRINTERS);
             });
 
+        // ORCA: opens the Physical Filaments inventory editor for opted-in non-SEMM multi-tool
+        // printers; visibility toggled alongside the other SEMM-mode buttons (show_SEMM_buttons).
+        p->m_printer_inventory = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "menu_filament");
+        p->m_printer_inventory->SetToolTip(_L("Edit physical filaments"));
+        p->m_printer_inventory->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
+            PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
+            const Preset &printer_preset = preset_bundle.printers.get_edited_preset();
+            const auto   *nozzle_diameters = printer_preset.config.option<ConfigOptionFloats>("nozzle_diameter");
+            size_t        tool_count = nozzle_diameters ? nozzle_diameters->size() : 1;
+            FilamentInventoryEditor dlg(this, printer_preset.name, tool_count);
+            dlg.ShowModal();
+        });
+
+        // ORCA: persistent entry point back into the row-mode filament-map dialog for the
+        // current plate; visibility gated the same as m_printer_inventory (show_SEMM_buttons),
+        // since both are only meaningful for opted-in filament-mapping printers.
+        p->m_printer_filament_map = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "plate_set_filament_map");
+        p->m_printer_filament_map->SetToolTip(_L("Map filaments to tools"));
+        p->m_printer_filament_map->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
+            p->plater->open_filament_map_dialog_for_current_plate();
+        });
+
         wxBoxSizer* h_sizer_title = new wxBoxSizer(wxHORIZONTAL);
         h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
@@ -2445,6 +2475,8 @@ Sidebar::Sidebar(Plater *parent)
         //h_sizer_title->AddStretchSpacer();
         h_sizer_title->Add(p->m_printer_connect , 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
         h_sizer_title->Add(p->m_printer_bbl_sync, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
+        h_sizer_title->Add(p->m_printer_inventory, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
+        h_sizer_title->Add(p->m_printer_filament_map, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
         h_sizer_title->Add(p->m_printer_setting, 0, wxALIGN_CENTER);
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::TitlebarMargin()));
         h_sizer_title->SetMinSize(-1, 3 * em);
@@ -3945,8 +3977,18 @@ void Sidebar::on_filament_count_change(size_t num_filaments)
 {
     auto& choices = combos_filament();
 
-    if (num_filaments == choices.size())
+    if (num_filaments == choices.size()) {
+        // Same slot count as last time, but the data behind it (filament_presets, colors) may
+        // have changed since these combos were last populated - e.g. a printer-preset reselect
+        // that ran PresetBundle::update_selections() in between. PlaterPresetComboBox::update()
+        // silently leaves a combo empty if it's called before its backing data is ready
+        // (filament_presets/colour not yet sized to match), and nothing else re-triggers it once
+        // the slot count itself stops changing, so refresh every combo here too rather than
+        // treating an unchanged count as nothing-to-do.
+        for (PlaterPresetComboBox *choice : choices)
+            choice->update();
         return;
+    }
 
     if (choices.size() == 1 || num_filaments == 1)
         choices[0]->GetDropDown().Invalidate();
@@ -4597,15 +4639,24 @@ bool Sidebar::should_show_SEMM_buttons()
     bool is_bbl_vendor = preset_bundle.is_bbl_vendor();
     auto cfg = preset_bundle.printers.get_edited_preset().config;
 
-    return cfg.opt_bool("single_extruder_multi_material") || is_bbl_vendor;
+    return cfg.opt_bool("single_extruder_multi_material") || is_bbl_vendor || filament_mapping_enabled(cfg);
 }
 
 void Sidebar::show_SEMM_buttons()
 {
     // ORCA
+    if (p && p->m_printer_inventory) {
+        PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
+        auto cfg = preset_bundle.printers.get_edited_preset().config;
+        bool enabled = filament_mapping_enabled(cfg);
+        p->m_printer_inventory->Show(enabled);
+        if (p->m_printer_filament_map)
+            p->m_printer_filament_map->Show(enabled);
+    }
+
     if (!p || p->combos_filament.empty() || !p->m_bpButton_add_filament || !p->m_bpButton_del_filament || !p->m_flushing_volume_btn)
         return;
-    
+
     bool is_multi_material = p->combos_filament.size() > 1;
     bool single_or_bbl     = should_show_SEMM_buttons();
     bool is_single = single_or_bbl && !is_multi_material; // SINGLE EXTRUDER / BBL WITH 1 MATERIAL
@@ -7138,7 +7189,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 partplate_list.reset_size(current_width + Bed3D::Axes::DefaultTipRadius, current_depth + Bed3D::Axes::DefaultTipRadius, current_height, false);
                             }
                             project_filament_count = config_loaded.option<ConfigOptionStrings>("filament_colour")->size();
-                            partplate_list.load_from_3mf_structure(plate_data, project_filament_count);
+                            // Use the LOADED project's own nozzle_diameter count, not the currently active
+                            // printer preset's: the project's printer preset is only applied later (see
+                            // config.apply()/config += config_loaded below), so using the active preset here
+                            // would clamp per-plate filament_map entries against the wrong (previous) printer.
+                            int project_nozzle_count = 1;
+                            if (const ConfigOptionFloats* project_nozzle_diameter = config_loaded.option<ConfigOptionFloats>("nozzle_diameter"))
+                                project_nozzle_count = (int) project_nozzle_diameter->size();
+                            partplate_list.load_from_3mf_structure(plate_data, project_filament_count, project_nozzle_count);
                             partplate_list.update_slice_context_to_current_plate(background_process);
                             this->preview->update_gcode_result(partplate_list.get_current_slice_result());
                             release_PlateData_list(plate_data);
@@ -8906,18 +8964,21 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
 
     Print::ApplyStatus invalidated;
     const auto& preset_bundle = wxGetApp().preset_bundle;
+    // filament_physical_map is orthogonal to tool mapping (it survives on single-extruder
+    // printers too), so it threads through both branches below.
+    PartPlate* cur_plate = background_process.get_current_plate();
+    std::vector<int> f_physical_maps = cur_plate ? cur_plate->get_real_physical_filament_maps(preset_bundle->project_config) : std::vector<int>();
     if (preset_bundle->get_printer_extruder_count() > 1) {
-        PartPlate* cur_plate = background_process.get_current_plate();
         std::vector<int> f_maps = cur_plate->get_real_filament_maps(preset_bundle->project_config);
         std::vector<int> f_volume_maps = cur_plate->get_filament_volume_maps();
         if (f_volume_maps.empty()) {
             f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
         }
-        invalidated = background_process.apply(this->model, preset_bundle->full_config(false, f_maps, f_volume_maps));
+        invalidated = background_process.apply(this->model, preset_bundle->full_config(false, f_maps, f_volume_maps, f_physical_maps));
         background_process.fff_print()->set_extruder_filament_info(get_extruder_filament_info());
     }
     else
-        invalidated = background_process.apply(this->model, preset_bundle->full_config(false));
+        invalidated = background_process.apply(this->model, preset_bundle->full_config(false, std::nullopt, std::nullopt, f_physical_maps));
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
@@ -17957,6 +18018,37 @@ std::vector<std::string> Plater::get_extruder_colors_from_plater_config(const GC
             return filament_colors;
 
         filament_colors = (config->option<ConfigOptionStrings>("filament_colour"))->values;
+
+        // Substitute physical filament colors when mapping is enabled.
+        // Gate order optimized to avoid expensive full_config() merge: check printer-scope
+        // mapping_enabled first, then plate map existence, then load inventory only if needed.
+        const Preset& edited_printer = wxGetApp().preset_bundle->printers.get_edited_preset();
+        if (filament_mapping_enabled(edited_printer.config)) {
+            PartPlate* cur_plate = p->partplate_list.get_curr_plate();
+            if (cur_plate != nullptr) {
+                std::vector<int> physical_maps = cur_plate->get_real_physical_filament_maps(*config);
+                if (!physical_maps.empty()) {
+                    // Load the filament inventory. Loop is bounds-checked: missing entries
+                    // (where physical_maps.size() < filament_colors.size()) retain project color.
+                    const std::string printer_preset_name = wxGetApp().preset_bundle->printers.get_selected_preset_name();
+                    const auto nozzle_diameters = edited_printer.config.option<ConfigOptionFloats>("nozzle_diameter");
+                    const size_t tool_count = nozzle_diameters->size();
+                    FilamentInventory inventory = load_filament_inventory(printer_preset_name, tool_count);
+
+                    // Substitute colors for mapped filaments
+                    for (size_t i = 0; i < physical_maps.size() && i < filament_colors.size(); ++i) {
+                        int physical_id = physical_maps[i];
+                        if (physical_id > 0) {
+                            const PhysicalFilament* phys_filament = inventory.find(physical_id);
+                            if (phys_filament != nullptr && !phys_filament->empty() && !phys_filament->color.empty()) {
+                                filament_colors[i] = phys_filament->color;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         return filament_colors;
     }
 }
@@ -18563,16 +18655,18 @@ void Plater::apply_background_progress()
     const auto& preset_bundle = wxGetApp().preset_bundle;
     //always apply the current plate's print
     Print::ApplyStatus invalidated;
+    // filament_physical_map is orthogonal to tool mapping, so it threads through both branches.
+    std::vector<int> f_physical_maps = part_plate->get_real_physical_filament_maps(preset_bundle->project_config);
     if (preset_bundle->get_printer_extruder_count() > 1) {
         std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
         std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
         if (f_volume_maps.empty()) {
             f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
         }
-        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
+        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps, f_physical_maps));
     }
     else
-        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+        invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, std::nullopt, std::nullopt, f_physical_maps));
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ") % __LINE__ % plate_index % invalidated % result_valid;
     if (invalidated & PrintBase::APPLY_STATUS_INVALIDATED)
@@ -18612,16 +18706,18 @@ int Plater::select_plate(int plate_index, bool need_slice)
         part_plate->get_print(&print, &gcode_result, NULL);
 
         //always apply the current plate's print
+        // filament_physical_map is orthogonal to tool mapping, so it threads through both branches.
+        std::vector<int> f_physical_maps = part_plate->get_real_physical_filament_maps(preset_bundle->project_config);
         if (preset_bundle->get_printer_extruder_count() > 1) {
             std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
             std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
             if (f_volume_maps.empty()) {
                 f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
             }
-            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
+            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps, f_physical_maps));
         }
         else
-            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+            invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, std::nullopt, std::nullopt, f_physical_maps));
         bool model_fits, validate_err;
 
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" %1%: plate %2%, after apply, invalidated= %3%, previous result_valid %4% ")%__LINE__ %plate_index  %invalidated %result_valid;
@@ -19210,6 +19306,29 @@ void Plater::open_filament_map_setting_dialog(wxCommandEvent &evt)
     return;
 }
 
+void Plater::open_filament_map_dialog_for_current_plate()
+{
+    PartPlate* curr_plate = p->partplate_list.get_curr_plate();
+    if (!curr_plate)
+        return;
+
+    std::vector<int> old_maps = curr_plate->get_real_filament_maps(wxGetApp().preset_bundle->project_config);
+    FilamentMapMode   old_mode = curr_plate->get_real_filament_map_mode(wxGetApp().preset_bundle->project_config);
+
+    if (!show_filament_map_rows_dialog_for_plate(this, curr_plate, _L("Map filaments to tools")))
+        return;   // cancelled, plate untouched
+
+    std::vector<int> new_maps = curr_plate->get_real_filament_maps(wxGetApp().preset_bundle->project_config);
+    FilamentMapMode   new_mode = curr_plate->get_real_filament_map_mode(wxGetApp().preset_bundle->project_config);
+    if (old_mode != new_mode || old_maps != new_maps) {
+        // Mirror open_filament_map_setting_dialog's no-auto-reslice invalidation path: mark the
+        // plate's slice result stale so the next Slice actually recomputes with the new mapping,
+        // rather than leaving a now-mismatched result marked valid.
+        curr_plate->update_slice_result_valid_state(false);
+        set_plater_dirty(true);
+        update();
+    }
+}
 
 //BBS: select Plate by hover_id
 int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModidyPlateName)
@@ -19246,16 +19365,18 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
 
             part_plate->get_print(&print, &gcode_result, NULL);
             //always apply the current plate's print
+            // filament_physical_map is orthogonal to tool mapping, so it threads through both branches.
+            std::vector<int> f_physical_maps = part_plate->get_real_physical_filament_maps(preset_bundle->project_config);
             if (preset_bundle->get_printer_extruder_count() > 1) {
                 std::vector<int> f_maps = part_plate->get_real_filament_maps(preset_bundle->project_config);
                 std::vector<int> f_volume_maps = part_plate->get_filament_volume_maps();
                 if (f_volume_maps.empty()) {
                     f_volume_maps = preset_bundle->get_default_nozzle_volume_types_for_filaments(f_maps);
                 }
-                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps));
+                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, f_maps, f_volume_maps, f_physical_maps));
             }
             else
-                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false));
+                invalidated = p->background_process.apply(this->model(), preset_bundle->full_config(false, std::nullopt, std::nullopt, f_physical_maps));
             bool model_fits, validate_err;
             validate_current_plate(model_fits, validate_err);
 

@@ -333,6 +333,7 @@ void DragDropPanel::NotifyDragDropCompleted()
     wxWindow *parent = GetParent();
     while (parent) {
         auto name = parent->GetName();
+        // Orca: bubble to the manual-mapping container that owns this column.
         if (name == wxT("FilamentMapManualPanel")) {
             parent->GetEventHandler()->ProcessEvent(event);
             break;

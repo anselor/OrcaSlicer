@@ -2200,21 +2200,29 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
     //Orca: sync filament num if it's a multi tool printer
     if (opt_key == "extruders_count" && !m_config->opt_bool("single_extruder_multi_material")){
         auto num_extruder = boost::any_cast<size_t>(value);
-        int         old_filament_size = wxGetApp().preset_bundle->filament_presets.size();
-        std::vector<std::string> new_colors;
-        for (int i = old_filament_size; i < num_extruder; ++i) {
-            wxColour    new_col   = Plater::get_next_color_for_filament();
-            std::string new_color = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
-            new_colors.push_back(new_color);
+        int  old_filament_size = wxGetApp().preset_bundle->filament_presets.size();
+        // Mapped printers own their filament count; growing tools never deletes filaments.
+        if (filament_mapping_enabled(*m_config) && num_extruder <= (size_t) old_filament_size) {
+            wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
+        } else {
+            std::vector<std::string> new_colors;
+            for (int i = old_filament_size; i < num_extruder; ++i) {
+                wxColour    new_col   = Plater::get_next_color_for_filament();
+                std::string new_color = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+                new_colors.push_back(new_color);
+            }
+            wxGetApp().preset_bundle->set_num_filaments(num_extruder, new_colors);
+            wxGetApp().plater()->on_filament_count_change(num_extruder);
+            wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
+            wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
         }
-        wxGetApp().preset_bundle->set_num_filaments(num_extruder, new_colors);
-        wxGetApp().plater()->on_filament_count_change(num_extruder);
-        wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
-        wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
     }
 
-    //Orca: disable purge_in_prime_tower if single_extruder_multi_material is disabled
-    if (opt_key == "single_extruder_multi_material" && m_config->opt_bool("single_extruder_multi_material") == false){
+    //Orca: disable purge_in_prime_tower if single_extruder_multi_material is disabled, unless
+    // the printer maps filaments to tools -- there, same-tool swaps still purge via the flush
+    // matrix on the Type2 tower, so the option stays meaningful and user-settable.
+    if (opt_key == "single_extruder_multi_material" && m_config->opt_bool("single_extruder_multi_material") == false
+        && !filament_mapping_enabled(*m_config)){
         DynamicPrintConfig new_conf = *m_config;
         new_conf.set_key_value("purge_in_prime_tower", new ConfigOptionBool(false));
         m_config_manipulation.apply(m_config, &new_conf);
@@ -5199,6 +5207,17 @@ void TabPrinter::build_fff()
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option, "printer_machine_gcode#change-filament-g-code");
 
+        optgroup = page->new_optgroup(L("Filament swap G-code"), L"param_gcode", 0);
+        optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
+            validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+        };
+        optgroup->edit_custom_gcode = edit_custom_gcode_fn;
+        option = optgroup->get_option("filament_swap_gcode");
+        option.opt.full_width = true;
+        option.opt.is_code = true;
+        option.opt.height = gcode_field_height;//150;
+        optgroup->append_single_option_line(option, "printer_machine_gcode#filament-swap-g-code");
+
         optgroup = page->new_optgroup(L("Change extrusion role G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key &opt_key, const boost::any &value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
@@ -5566,6 +5585,7 @@ if (is_marlin_flavor)
             });
         };
         optgroup->append_single_option_line("manual_filament_change", "printer_multimaterial_setup#manual-filament-change");
+        optgroup->append_single_option_line("enable_filament_mapping", "printer_multimaterial_setup");
         optgroup->append_single_option_line("bed_temperature_formula", "printer_basic_information_advanced#bed-temperature-type");
 
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
@@ -6077,15 +6097,22 @@ void TabPrinter::toggle_options()
             new_conf.set_key_value("manual_filament_change", new ConfigOptionBool(false));
             load_config(new_conf);
         }
+        // Orca: mapped (non-SEMM) printers still purge same-tool swaps via the flush matrix on
+        // the Type2 tower, so purge_in_prime_tower stays user-settable for them too.
+        bool is_filament_mapping_enabled = filament_mapping_enabled(*m_config);
         toggle_option("extruders_count", !bSEMM);
         toggle_option("manual_filament_change", bSEMM);
-        toggle_option("purge_in_prime_tower", bSEMM && supports_wipe_tower_2);
+        toggle_option("purge_in_prime_tower", (bSEMM || is_filament_mapping_enabled) && supports_wipe_tower_2);
 
         // Orca: "Tool change on wipe tower" only makes sense for multi-extruder (multi-toolhead) printers
         // using a Type 2 wipe tower. SEMM already always travels to the tower as part of the purge,
         // so the option is irrelevant there.
         const size_t extruders_count = m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
         toggle_option("tool_change_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
+
+        // Orca: filament-to-tool mapping only makes sense for non-BBL, multi-extruder, non-SEMM printers.
+        bool can_map_filaments = !is_BBL_printer && extruders_count > 1 && !bSEMM;
+        toggle_line("enable_filament_mapping", can_map_filaments);
     }
     wxString extruder_number;
     long val = 1;
