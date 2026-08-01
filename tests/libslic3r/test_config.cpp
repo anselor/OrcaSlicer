@@ -779,3 +779,115 @@ SCENARIO("ConfigOptionVector::set_to_index throws on incompatible type", "[Confi
         }
     }
 }
+
+TEST_CASE("Filament mapping defaults leave the feature disabled", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.opt_bool("enable_filament_mapping") == false);
+    REQUIRE(config.option<ConfigOptionInts>("tool_filament_map")->values.empty());
+}
+
+TEST_CASE("filament_physical_map defaults to empty and is a develop-mode option", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const ConfigOptionInts* opt = config.option<ConfigOptionInts>("filament_physical_map");
+    REQUIRE(opt != nullptr);
+    REQUIRE(opt->values.empty());
+
+    const ConfigOptionDef* def = print_config_def.get("filament_physical_map");
+    REQUIRE(def != nullptr);
+    REQUIRE(def->mode == comDevelop);
+}
+
+TEST_CASE("filament_mapping_enabled requires the flag, two nozzles, and no SEMM", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"},
+                                   {"single_extruder_multi_material", "0"}});
+    REQUIRE(filament_mapping_enabled(config) == false);   // flag off
+
+    config.set_deserialize_strict({{"enable_filament_mapping", "1"}});
+    REQUIRE(filament_mapping_enabled(config) == true);
+
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4"}});
+    REQUIRE(filament_mapping_enabled(config) == false);   // single tool
+
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"},
+                                   {"single_extruder_multi_material", "1"}});
+    REQUIRE(filament_mapping_enabled(config) == false);   // SEMM
+}
+
+TEST_CASE("normalize_plate_filament_map preserves empty-means-global-fallback semantics", "[Config]") {
+    std::vector<int> values;
+    normalize_plate_filament_map(values, 4, 2);
+    REQUIRE(values.empty());
+}
+
+TEST_CASE("normalize_plate_filament_map pads a short map with 1", "[Config]") {
+    std::vector<int> values = {2, 1};
+    normalize_plate_filament_map(values, 4, 2);
+    REQUIRE(values == std::vector<int>{2, 1, 1, 1});
+}
+
+TEST_CASE("normalize_plate_filament_map clamps out-of-range entries into [1, nozzle_count]", "[Config]") {
+    // Loaded on a single-nozzle printer: any entry pointing at tool 2 must clamp to 1,
+    // reflecting Finding 1 (per-plate maps must be bounded by the PROJECT's own nozzle count).
+    std::vector<int> values = {2, 0, -5, 99};
+    normalize_plate_filament_map(values, 4, 1);
+    REQUIRE(values == std::vector<int>{1, 1, 1, 1});
+}
+
+TEST_CASE("normalize_plate_filament_map leaves a well-formed map unchanged", "[Config]") {
+    // BBL dual-nozzle no-op case: already the right length, already in range.
+    std::vector<int> values = {1, 2, 1, 2};
+    normalize_plate_filament_map(values, 4, 2);
+    REQUIRE(values == std::vector<int>{1, 2, 1, 2});
+}
+
+TEST_CASE("normalize_plate_filament_map never truncates a longer map", "[Config]") {
+    std::vector<int> values = {1, 2, 1, 2, 1};
+    normalize_plate_filament_map(values, 4, 2);
+    REQUIRE(values == std::vector<int>{1, 2, 1, 2, 1});
+}
+
+TEST_CASE("filament_swap_gcode defaults to empty and is a printer option", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.opt_string("filament_swap_gcode").empty());
+}
+
+// Regression: Print::validate's overflow guard (more used filaments than tools) rejects the
+// plate unless filament_swap_gcode is set (see "A 4-tool profile with 5 filaments validates
+// once swap gcode is set" in test_multifilament.cpp for that engine-level behavior). The
+// Snapmaker U1 and WonderMaker ZR Ultra/Ultra S 0.4 bases default enable_filament_mapping on,
+// so without their own filament_swap_gcode they would hit that guard before the feature is ever
+// reachable. Parse the shipped JSON directly (not through DynamicPrintConfig::load_from_json,
+// which would silently pull in an inherited value from a base profile) so this only passes when
+// the key is actually set in the file it claims to be set in.
+static void require_profile_has_swap_gcode(const std::string &relative_path)
+{
+    const std::string path = std::string(PROFILES_DIR) + "/" + relative_path;
+    // PROFILES_DIR is an absolute path baked in at build time; a sparse checkout without
+    // resources/ leaves it missing (see the same guard in fff_print/test_gcodewriter.cpp).
+    if (!boost::filesystem::exists(path))
+        SKIP("shipped profile not present in this checkout: " << path);
+
+    boost::nowide::ifstream ifs(path);
+    REQUIRE(ifs.good());
+    nlohmann::json j;
+    ifs >> j;
+
+    INFO("profile: " << path);
+    REQUIRE(j.contains("enable_filament_mapping"));
+    REQUIRE(j["enable_filament_mapping"] == "1");
+    REQUIRE(j.contains("filament_swap_gcode"));
+    REQUIRE_FALSE(j["filament_swap_gcode"].get<std::string>().empty());
+}
+
+TEST_CASE("Filament-mapping printer profiles ship a non-empty filament_swap_gcode", "[Config][Profiles]") {
+    SECTION("Snapmaker U1") {
+        require_profile_has_swap_gcode("Snapmaker/machine/fdm_U1.json");
+    }
+    SECTION("WonderMaker ZR Ultra 0.4 nozzle") {
+        require_profile_has_swap_gcode("WonderMaker/machine/WonderMaker ZR Ultra 0.4 nozzle.json");
+    }
+    SECTION("WonderMaker ZR Ultra S 0.4 nozzle") {
+        require_profile_has_swap_gcode("WonderMaker/machine/WonderMaker ZR Ultra S 0.4 nozzle.json");
+    }
+}
