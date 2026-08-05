@@ -1,7 +1,7 @@
 {
 	"type": "machine",
 	"name": "WonderMaker ZR Ultra S 0.8 nozzle",
-	"inherits": "WonderMaker ZR Ultra S 0.4 nozzle",
+	"inherits": "fdm_ultras_common",
 	"from": "system",
 	"setting_id": "0BPLKMspArilfkGT",
 	"instantiation": "true",

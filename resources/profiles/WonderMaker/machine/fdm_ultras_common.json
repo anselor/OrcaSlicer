@@ -1,0 +1,9 @@
+{
+	"type": "machine",
+	"name": "fdm_ultras_common",
+	"inherits": "fdm_ultra_common",
+	"from": "system",
+	"instantiation": "false",
+	"support_air_filtration": "1",
+	"support_chamber_temp_control": "1"
+}
