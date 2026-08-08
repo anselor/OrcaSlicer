@@ -823,6 +823,44 @@ TEST_CASE("normalize_plate_filament_map never truncates a longer map", "[Config]
     REQUIRE(values == std::vector<int>{1, 2, 1, 2, 1});
 }
 
+TEST_CASE("filament_swap_gcode defaults to empty and is a printer option", "[Config]") {
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.opt_string("filament_swap_gcode").empty());
+}
+
+// The Snapmaker U1 and WonderMaker ZR Ultra/Ultra S bases support manual filament swaps, so
+// they must ship a filament_swap_gcode of their own -- an empty one leaves the operator with a
+// silent pause. Parse the shipped JSON directly (not through DynamicPrintConfig::load_from_json,
+// which would silently pull in an inherited value from a base profile) so this only passes when
+// the key is actually set in the file it claims to be set in.
+static void require_profile_has_swap_gcode(const std::string &relative_path)
+{
+    const std::string path = std::string(PROFILES_DIR) + "/" + relative_path;
+    // PROFILES_DIR is an absolute path baked in at build time; a sparse checkout without
+    // resources/ leaves it missing (see the same guard in fff_print/test_gcodewriter.cpp).
+    if (!boost::filesystem::exists(path))
+        SKIP("shipped profile not present in this checkout: " << path);
+
+    boost::nowide::ifstream ifs(path);
+    REQUIRE(ifs.good());
+    nlohmann::json j;
+    ifs >> j;
+
+    INFO("profile: " << path);
+    REQUIRE(j.contains("filament_swap_gcode"));
+    REQUIRE_FALSE(j["filament_swap_gcode"].get<std::string>().empty());
+}
+
+TEST_CASE("Filament-mapping printer profiles ship a non-empty filament_swap_gcode", "[Config][Profiles]") {
+    SECTION("Snapmaker U1") {
+        require_profile_has_swap_gcode("Snapmaker/machine/fdm_U1.json");
+    }
+    SECTION("WonderMaker ZR Ultra family") {
+        // Both ZR Ultra and ZR Ultra S variants inherit these from this one parent.
+        require_profile_has_swap_gcode("WonderMaker/machine/fdm_ultra_common.json");
+    }
+}
+
 #include "libslic3r/Preset.hpp"
 
 TEST_CASE("Preset::normalize keeps per-filament options at filament count when filaments exceed extruders", "[Config]") {
@@ -848,3 +886,13 @@ TEST_CASE("Preset::normalize keeps per-filament options at filament count when f
     REQUIRE(config.option<ConfigOptionStrings>("filament_type")->values.size() == 5);
 }
 
+TEST_CASE("enable_manual_filament_swap defaults to off and is a printer option", "[Config]") {
+    // The default toolchange state is a fixed 1:1 tool->filament
+    // mapping; recording additional manually-swapped filaments is an explicit opt-in.
+    const ConfigOptionDef* def = print_config_def.get("enable_manual_filament_swap");
+    REQUIRE(def != nullptr);
+    CHECK(def->type == coBool);
+    REQUIRE_FALSE(static_cast<const ConfigOptionBool*>(def->default_value.get())->value);
+    const auto& printer_opts = Preset::printer_options();
+    CHECK(std::find(printer_opts.begin(), printer_opts.end(), "enable_manual_filament_swap") != printer_opts.end());
+}

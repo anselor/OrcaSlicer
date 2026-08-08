@@ -6629,6 +6629,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionEnum<FilamentMappingProtocol>(FilamentMappingProtocol::fmpNone));
 
+    def = this->add("enable_manual_filament_swap", coBool);
+    def->label = L("Allow manual filament swaps");
+    def->tooltip = L("Allow recording additional filaments on a tool to be swapped in by hand "
+                     "mid-print (using the filament swap G-code). When disabled, the physical "
+                     "filaments editor only offers the fixed one-filament-per-tool loadout. "
+                     "Filaments already recorded as swappable remain usable either way.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("wipe_tower_type", coEnum);
     def->label = L("Wipe tower type");
     def->tooltip = L("Choose the wipe tower implementation for multi-material prints. Type 1 is recommended for Bambu and Qidi printers with a filament cutter. Type 2 offers better compatibility with multi-tool and MMU printers and provide overall better compatibility.");
@@ -7368,6 +7377,22 @@ void PrintConfigDef::init_fff_params()
     def->height = 5;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString());
+
+    def = this->add("filament_swap_gcode", coString);
+    def->label = L("Filament swap G-code");
+    def->tooltip = L("G-code inserted when the next filament is serviced by the SAME physical tool "
+                     "as the current one (a manual or MMU-style swap), instead of a tool change. "
+                     "Typically M600 or PAUSE, or a vendor swap macro. "
+                     "Placeholders previous_filament_id, next_filament_id and next_extruder "
+                     "(the shared physical tool) are available, along with next_filament_number "
+                     "(1-indexed filament slot), next_filament_type and next_filament_colour (hex) "
+                     "to tell the operator which filament to load. "
+                     "Only used when filament-to-tool mapping is enabled.");
+    def->multiline = true;
+    def->full_width = true;
+    def->height = 12;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("change_extrusion_role_gcode", coString);
     def->label = L("Change extrusion role G-code");

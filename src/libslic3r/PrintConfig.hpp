@@ -1597,6 +1597,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
+    ((ConfigOptionString,              filament_swap_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
     ((ConfigOptionString,              process_change_extrusion_role_gcode))
     ((ConfigOptionStrings,             filament_change_extrusion_role_gcode))

@@ -10,7 +10,7 @@
 	],
 	"single_extruder_multi_material": "0",
 	"enable_filament_mapping": "1",
-	"filament_swap_gcode": "M117 Swap filament for tool {next_extruder}\nPAUSE",
+	"filament_swap_gcode": "M117 Load filament {next_filament_number} ({next_filament_type}, {next_filament_colour}) into tool {next_extruder}\nPAUSE",
 	"nozzle_diameter": [
 		"0.4",
 		"0.4",

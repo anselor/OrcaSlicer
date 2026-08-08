@@ -5224,6 +5224,17 @@ void TabPrinter::build_fff()
         option.opt.height = gcode_field_height;//150;
         optgroup->append_single_option_line(option, "printer_machine_gcode#change-filament-g-code");
 
+        optgroup = page->new_optgroup(L("Filament swap G-code"), L"param_gcode", 0);
+        optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key& opt_key, const boost::any& value) {
+            validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
+        };
+        optgroup->edit_custom_gcode = edit_custom_gcode_fn;
+        option = optgroup->get_option("filament_swap_gcode");
+        option.opt.full_width = true;
+        option.opt.is_code = true;
+        option.opt.height = gcode_field_height;//150;
+        optgroup->append_single_option_line(option, "printer_machine_gcode#filament-swap-g-code");
+
         optgroup = page->new_optgroup(L("Change extrusion role G-code"), L"param_gcode", 0);
         optgroup->m_on_change = [this, &optgroup_title = optgroup->title](const t_config_option_key &opt_key, const boost::any &value) {
             validate_custom_gcode_cb(this, optgroup_title, opt_key, value);
@@ -5592,6 +5603,7 @@ if (is_marlin_flavor)
         };
         optgroup->append_single_option_line("manual_filament_change", "printer_multimaterial_setup#manual-filament-change");
         optgroup->append_single_option_line("filament_mapping_protocol", "printer_multimaterial_setup");
+        optgroup->append_single_option_line("enable_manual_filament_swap", "printer_multimaterial_setup");
         optgroup->append_single_option_line("bed_temperature_formula", "printer_basic_information_advanced#bed-temperature-type");
 
         optgroup = page->new_optgroup(L("Wipe tower"), "param_tower");
@@ -6135,6 +6147,9 @@ void TabPrinter::toggle_options()
         toggle_option("tool_change_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
         toggle_option("wait_for_temp_on_wipe_tower", !bSEMM && supports_wipe_tower_2 && extruders_count > 1);
 
+        // Orca: manual swaps only make sense for non-BBL, multi-extruder, non-SEMM printers.
+        bool can_map_filaments = !is_BBL_printer && extruders_count > 1 && !bSEMM;
+        toggle_line("enable_manual_filament_swap", can_map_filaments);
     }
     wxString extruder_number;
     long val = 1;
