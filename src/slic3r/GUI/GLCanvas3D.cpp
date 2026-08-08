@@ -4153,12 +4153,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     Plater::SingleSnapshot single(wxGetApp().plater());
 
 #ifdef __WXMAC__
-    // On macOS, the mouse key state is only present for mouse btn related events such as wxEVT_LEFT_DOWN.
-    // For other events, all buttons are reported as non-pressed, such as window leaving event. This causes
-    // imgui stopped responding if cursor moved out of window, such as
-    // https://github.com/OrcaSlicer/OrcaSlicer/pull/14999#issuecomment-5151344759
-    // We solve this by correcting the state of the event from the actual mouse state querying with `wxGetMouseState()`
-    // so it works like on other platforms.
+    // On macOS, the mouse button state is only present for mouse-button events such as wxEVT_LEFT_DOWN;
+    // other events (e.g. window-leaving) report all buttons as unpressed, which stops ImGui responding
+    // once the cursor leaves the window. Correct it from the actual mouse state via wxGetMouseState().
     {
         const auto state = wxGetMouseState();
         evt.SetLeftDown(state.LeftIsDown());
@@ -9206,9 +9203,10 @@ void GLCanvas3D::_render_imgui_select_plate_toolbar()
                 all_plates_stats_item->selected = false;
                 bool was_active = item->selected;
                 item->selected = true;
-                // begin to slicing plate
-                if (item->slice_state != IMToolbarItem::SliceState::SLICED)
-                    wxGetApp().plater()->update(true, true);
+                // ORCA: don't slice here -- the plate switch to i only happens once the queued
+                // EVT_GLTOOLBAR_SELECT_SLICED_PLATE below is dispatched, so slicing now would target
+                // the still-current (old) plate. select_plate(i, /*need_slice=*/true) switches and
+                // slices in the correct order.
                 wxCommandEvent* evt = new wxCommandEvent(EVT_GLTOOLBAR_SELECT_SLICED_PLATE);
                 // ORCA dont reset viewing angle if item was active and non sliced to allow making comparisons on parameter changes
                 if(!was_active || (was_active && item->slice_state == IMToolbarItem::SliceState::SLICED)) 

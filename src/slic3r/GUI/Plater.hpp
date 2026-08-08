@@ -86,6 +86,7 @@ using t_optgroups = std::vector <std::shared_ptr<ConfigOptionsGroup>>;
 class Plater;
 enum class ActionButtonType : int;
 
+
 #define EVT_PUBLISHING_START        1
 #define EVT_PUBLISHING_STOP         2
 
@@ -279,6 +280,7 @@ private:
     wxBoxSizer* m_scrolled_sizer = nullptr;
     bool            m_need_auto_sync_after_connect_printer{false};
 };
+
 
 class Plater: public wxPanel
 {
@@ -739,6 +741,9 @@ public:
     // True when the active preset references plugins that are missing and not yet acknowledged, as
     // of the last validate_current_plate. Other slice-ready writers consult this to stay consistent.
     bool plugins_block_slicing() const;
+    // Orca: applies `plate` (filament/volume/physical maps) to background_process. Shared by
+    // apply_background_progress, select_plate, and select_plate_by_hover_id.
+    PrintBase::ApplyStatus apply_plate_to_background_process(PartPlate* plate, PresetBundle& preset_bundle);
     //BBS: select the plate by index
     int select_plate(int plate_index, bool need_slice = false);
     //BBS: update progress result
