@@ -134,6 +134,9 @@
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
 #include "PresetComboBoxes.hpp"
+#include "ActivePrinterSession.hpp"
+#include "FilamentInventoryEditor.hpp"
+#include "FilamentInventoryStore.hpp"
 #include "MsgDialog.hpp"
 #include "Widgets/MultiNozzleSync.hpp"           // NozzleOption, tryPopUpMultiNozzleDialog, setExtruderNozzleCount
 #include "DeviceCore/DevNozzleSystem.h"          // DevNozzle, GetExtNozzles / GetRackNozzles
@@ -735,6 +738,10 @@ struct Sidebar::priv
     ScalableButton* m_printer_connect = nullptr;
     ScalableButton* m_printer_bbl_sync = nullptr;
     ScalableButton* m_printer_setting = nullptr;
+    // Orca: opens FilamentInventoryEditor; only shown for non-SEMM multi-tool non-BBL printers
+    // (the only shape whose per-tool loaded-filament record means anything), see the Show()
+    // gate in Sidebar::update_all_preset_comboboxes.
+    ScalableButton* m_printer_inventory = nullptr;
     wxStaticText *  m_text_printer_settings = nullptr;
     wxPanel* m_panel_printer_content = nullptr;
     // Filament Track Switch status overlay: an icon floated over the left/single extruder AMS area,
@@ -2438,6 +2445,16 @@ Sidebar::Sidebar(Plater *parent)
             wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_PRINTERS);
             });
 
+        p->m_printer_inventory = new ScalableButton(p->m_panel_printer_title, wxID_ANY, "menu_filament");
+        p->m_printer_inventory->SetToolTip(_L("Printer Material Settings"));
+        p->m_printer_inventory->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
+            FilamentInventories store;
+            size_t         tool_count     = resolve_active_printer_tool_count(store);
+            const Preset  &printer_preset = active_printer_session().profile();
+            FilamentInventoryEditor dlg(this, printer_preset.name, tool_count);
+            dlg.ShowModal();
+        });
+
         wxBoxSizer* h_sizer_title = new wxBoxSizer(wxHORIZONTAL);
         h_sizer_title->Add(p->m_printer_icon, 0, wxALIGN_CENTRE | wxLEFT, FromDIP(SidebarProps::TitlebarMargin()));
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::ElementSpacing()));
@@ -2445,6 +2462,7 @@ Sidebar::Sidebar(Plater *parent)
         //h_sizer_title->AddStretchSpacer();
         h_sizer_title->Add(p->m_printer_connect , 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
         h_sizer_title->Add(p->m_printer_bbl_sync, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
+        h_sizer_title->Add(p->m_printer_inventory, 0, wxALIGN_CENTER | wxRIGHT, FromDIP(SidebarProps::WideSpacing())); // used larger margin to prevent accidental clicks
         h_sizer_title->Add(p->m_printer_setting, 0, wxALIGN_CENTER);
         h_sizer_title->AddSpacer(FromDIP(SidebarProps::TitlebarMargin()));
         h_sizer_title->SetMinSize(-1, 3 * em);
@@ -4609,6 +4627,18 @@ bool Sidebar::should_show_SEMM_buttons()
 
 void Sidebar::show_SEMM_buttons()
 {
+    // Orca: the printer-materials button is only meaningful where each physical tool holds its
+    // own filament: multi-tool, not SEMM (one shared hotend), not BBL (its AMS has its own sync
+    // UI). Gated here because this runs on every printer-preset switch.
+    if (p && p->m_printer_inventory) {
+        PresetBundle &preset_bundle = *wxGetApp().preset_bundle;
+        const auto   &cfg           = preset_bundle.printers.get_edited_preset().config;
+        const auto   *nozzle_diams  = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+        const bool    multi_tool    = nozzle_diams != nullptr && nozzle_diams->values.size() > 1;
+        p->m_printer_inventory->Show(multi_tool && !cfg.opt_bool("single_extruder_multi_material") &&
+                                     !preset_bundle.is_bbl_vendor());
+    }
+
     // ORCA
     if (!p || p->combos_filament.empty() || !p->m_bpButton_add_filament || !p->m_bpButton_del_filament || !p->m_flushing_volume_btn)
         return;
