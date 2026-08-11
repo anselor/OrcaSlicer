@@ -3,6 +3,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     test_dev_mapping.cpp
     test_snapmaker_protocol.cpp
+    test_wondermaker_protocol.cpp
     test_moonraker_storage.cpp
     test_network_versions.cpp
     test_action_source.cpp
