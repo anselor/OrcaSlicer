@@ -10,6 +10,7 @@
 #include "Geometry.hpp"
 #include "CommonDefs.hpp"
 #include "PrintBase.hpp"
+#include "FilamentCompaction.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "Fill/FillTpmsAdaptive.hpp"
@@ -1078,6 +1079,12 @@ public:
 
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config, bool extruder_applied = false) override;
 
+    // Orca: the filament renumbering this Print was sliced with, on printers whose firmware only
+    // accepts T0..T(tool_count-1) (see FilamentCompaction.hpp). Identity -- and empty -- for
+    // every other printer. The send path needs it to say which project slot each emitted tool
+    // number actually prints.
+    const FilamentCompaction& filament_compaction() const { return m_filament_compaction; }
+
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
@@ -1487,6 +1494,9 @@ private:
     }
 
     PrintConfig                             m_config;
+    // Orca: the filament renumbering applied by the last apply(); empty unless the printer's
+    // protocol requires dense tool numbering. See filament_compaction().
+    FilamentCompaction                      m_filament_compaction;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     PrintObjectPtrs                         m_objects;
