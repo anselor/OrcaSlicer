@@ -259,12 +259,15 @@ private:
     // Dialect of the last successful fetch; published with the slots so a send can re-confirm it.
     MoonrakerFilamentDialect::Dialect m_filament_dialect = MoonrakerFilamentDialect::Dialect::none;
 
-    // JSON helper methods
+protected:
+    // JSON helper methods, shared with the agents deriving from this one
     static std::string safe_json_string(const nlohmann::json& obj, const char* key);
     static int safe_json_int(const nlohmann::json& obj, const char* key);
     static std::string safe_array_string(const nlohmann::json& arr, int idx);
     static int safe_array_int(const nlohmann::json& arr, int idx);
     static std::string normalize_color_value(const std::string& color);
+
+private:
 
     std::string                        ssdp_announced_host;
     std::string                        ssdp_announced_id;
