@@ -71,17 +71,17 @@ TEST_CASE("An object on another plate contributes no filament", "[FilamentCompac
     CHECK(used_filament_slots(model, plain_config(8)) == std::vector<int>{2});
 }
 
-TEST_CASE("A plate already using a dense prefix needs no renumbering", "[FilamentCompaction]")
+// Renumbering is decided by the printer's T namespace, not by the vendor: a plate that fits
+// (highest used number within the namespace) keeps its numbers, any plate that reaches past it
+// is packed to T0..Tk-1 on every device-resolved printer, because Orca delivers the map.
+TEST_CASE("A plate is renumbered only when its highest filament exceeds the namespace", "[FilamentCompaction]")
 {
     // Identity is reported as empty so the caller skips the model copy entirely.
-    const FilamentCompaction compaction = build_filament_compaction(model_using({1, 2}), plain_config(8));
-    CHECK(compaction.slot_of_tool.empty());
-    CHECK(compaction.is_identity());
-}
+    CHECK(build_filament_compaction(model_using({1, 2}), plain_config(8), 4).is_identity());
+    CHECK(build_filament_compaction(model_using({4, 7}), plain_config(8), 32).is_identity());
+    CHECK(build_filament_compaction(model_using({4, 7}), plain_config(8), 7).is_identity());
 
-TEST_CASE("A sparse plate compacts to dense tool numbers in slot order", "[FilamentCompaction]")
-{
-    const FilamentCompaction compaction = build_filament_compaction(model_using({4, 7}), plain_config(8));
+    const FilamentCompaction compaction = build_filament_compaction(model_using({4, 7}), plain_config(8), 4);
     REQUIRE(compaction.slot_of_tool == std::vector<int>{3, 6});
     CHECK(compaction.tool_of_slot(3) == 0);
     CHECK(compaction.tool_of_slot(6) == 1);
@@ -95,7 +95,7 @@ TEST_CASE("Compaction renumbers the model's filament references", "[FilamentComp
     model.objects[0]->volumes[0]->config.set("extruder", 4);
     model.objects[1]->config.set("support_filament", 7);
 
-    const FilamentCompaction compaction = build_filament_compaction(model, plain_config(8));
+    const FilamentCompaction compaction = build_filament_compaction(model, plain_config(8), 4);
     apply_filament_compaction(model, model, compaction);
 
     CHECK(model.objects[0]->config.option("extruder")->getInt() == 1);
@@ -176,8 +176,8 @@ TEST_CASE("Recompacting an unchanged source leaves every timestamp unchanged", "
 
     Model first  = model;
     Model second = model;
-    apply_filament_compaction(first, model, build_filament_compaction(model, config));
-    apply_filament_compaction(second, model, build_filament_compaction(model, config));
+    apply_filament_compaction(first, model, build_filament_compaction(model, config, 4));
+    apply_filament_compaction(second, model, build_filament_compaction(model, config, 4));
 
     // ModelConfigObject hides timestamp() at its own level; the ModelConfig base exposes it.
     auto config_stamp = [](const ModelObject* object) {
@@ -195,7 +195,7 @@ TEST_CASE("A filament the plate does not print keeps its number", "[FilamentComp
     // it a dense tool would claim a tool the plate does not use; leaving it alone is correct.
     Model model = model_using({4, 7});
     model.objects[0]->config.set("support_filament", 2);
-    const FilamentCompaction compaction = build_filament_compaction(model, plain_config(8));
+    const FilamentCompaction compaction = build_filament_compaction(model, plain_config(8), 4);
     apply_filament_compaction(model, model, compaction);
     CHECK(model.objects[0]->config.option("support_filament")->getInt() == 2);
 }
@@ -213,7 +213,8 @@ TEST_CASE("A mixed slot is used through its components", "[FilamentCompaction]")
 
 TEST_CASE("A used mix is numbered after the physical tools", "[FilamentCompaction]")
 {
-    const FilamentCompaction compaction = build_filament_compaction(model_using({5}), mixed_config(6, 5, "1,3"));
+    // Namespace 2: the components (slots 0 and 2) reach past it, so the plate is renumbered.
+    const FilamentCompaction compaction = build_filament_compaction(model_using({5}), mixed_config(6, 5, "1,3"), 2);
     REQUIRE(compaction.slot_of_tool == std::vector<int>{0, 2, 4});
     CHECK(compaction.tool_of_slot(4) == 2);
 }
@@ -221,7 +222,7 @@ TEST_CASE("A used mix is numbered after the physical tools", "[FilamentCompactio
 TEST_CASE("Four physical filaments and their mixes need no renumbering", "[FilamentCompaction]")
 {
     // The field case: filaments 1-4 loaded, 5 a mix of two of them, on a four-tool printer.
-    const FilamentCompaction compaction = build_filament_compaction(model_using({1, 2, 3, 4, 5}), mixed_config(5, 5, "2,4"));
+    const FilamentCompaction compaction = build_filament_compaction(model_using({1, 2, 3, 4, 5}), mixed_config(5, 5, "2,4"), 4);
     CHECK(compaction.slot_of_tool.empty());
 }
 
@@ -251,7 +252,7 @@ TEST_CASE("A painted mix is renumbered in the copy's painted-filament list", "[F
     const DynamicPrintConfig config = mixed_config(8, 8, "4,5");
     CHECK(used_filament_slots(model, config) == std::vector<int>{0, 3, 4});
 
-    const FilamentCompaction compaction = build_filament_compaction(model, config);
+    const FilamentCompaction compaction = build_filament_compaction(model, config, 4);
     REQUIRE(compaction.slot_of_tool == std::vector<int>{0, 3, 4, 7});
 
     Model copy = model;

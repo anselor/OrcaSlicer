@@ -136,11 +136,18 @@ std::vector<int> used_filament_slots(const Model& model, const DynamicPrintConfi
     return physical_slots_of(referenced_filament_slots(model, config), config);
 }
 
-FilamentCompaction build_filament_compaction(const Model& model, const DynamicPrintConfig& config)
+FilamentCompaction build_filament_compaction(const Model& model, const DynamicPrintConfig& config, size_t namespace_size)
 {
     FilamentCompaction compaction;
     const std::vector<int> referenced = referenced_filament_slots(model, config);
     compaction.slot_of_tool           = physical_slots_of(referenced, config);
+    // A plate whose highest physical tool number fits the namespace goes to the printer as-is:
+    // the numbers are the project's, which is what the U1's slot-indexed table and a changer's
+    // logical T space both expect. Only a plate reaching past the namespace is packed.
+    if (compaction.slot_of_tool.empty() || size_t(compaction.slot_of_tool.back()) + 1 <= namespace_size) {
+        compaction.slot_of_tool.clear();
+        return compaction;
+    }
     // The mixes come after every physical tool so T0..T(n-1) are exactly what the printer loads.
     for (int slot : referenced)
         if (is_mixed_slot(config, slot))
