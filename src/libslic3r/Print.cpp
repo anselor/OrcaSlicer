@@ -1765,50 +1765,24 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     }
 
     // Orca: when the PRINTER resolves the filament->tool assignment the project may hold more
-    // filaments than the printer has tools, but a single plate is still bounded by how many
-    // logical tools that firmware can route (see protocol_max_plate_filaments). The g-code
-    // addresses one logical tool per filament, so the plate needs tool indices up to its
-    // highest-numbered used filament; anything beyond the limit would reach the printer as a
-    // tool command it has no macro for.
-    // Read both from the FULL config, never from m_config: filament_mapping_protocol is a printer
-    // option with no member in the static PrintConfig struct, so m_config.option() always returns
-    // null for it and the protocol silently reads as fmpNone. That capped a Snapmaker U1 -- which
-    // routes 32 logical filaments onto its 4 heads -- at 4, rejecting the 5-on-4 plate its
-    // firmware handles natively. enable_filament_mapping does have a member, which is why the gate
-    // itself still fired.
+    // filaments than the printer has tools; a single plate is bounded by the printer's T
+    // namespace (filament_namespace_size). Numbering never matters here: a plate reaching past
+    // the namespace was renumbered densely on apply (FilamentCompaction), so what is left to
+    // check is the COUNT of distinct filaments the plate commands. Read from the FULL config,
+    // never from m_config: the protocol and the probe are printer options with no member in the
+    // static PrintConfig struct, so m_config.option() returns null for them.
     const DynamicPrintConfig& printer_config = this->full_print_config();
     if (device_resolves_filament_mapping(printer_config)) {
-        // What the printer registered (device_tool_count, cached by the materials sync) outranks
-        // the protocol's constant in both directions; 0 is "never probed".
-        const int    reported            = printer_config.opt_int("device_tool_count");
-        const size_t max_plate_filaments = reported > 0 ? size_t(reported)
-                                                        : protocol_max_plate_filaments(filament_mapping_protocol_of(printer_config), nozzles);
+        const size_t namespace_size = filament_namespace_size(printer_config, nozzles);
         // A mixed (virtual) slot never reaches the printer: ToolOrdering resolves it to its
-        // component filaments and only those are commanded as tools. Bound the components, not
-        // the slot's own number -- a project's mixes are numbered after every physical filament,
-        // so counting them rejected a four-filament plate on a four-tool printer.
+        // component filaments and only those are commanded as tools.
         const std::vector<unsigned int> physical_extruders = has_any_mixed_filament(m_config.filament_is_mixed.values)
             ? expand_mixed_filaments(extruders, m_config.filament_is_mixed.values, m_config.filament_mixed_components.values)
             : extruders;
-        // Sorted and deduplicated, so the last entry is the highest used filament (0-based); +1 is
-        // both the count of logical tools the g-code will address and the filament's 1-based number
-        // as the user sees it.
-        const size_t highest_used_filament = physical_extruders.empty() ? 0 : size_t(physical_extruders.back()) + 1;
-        if (highest_used_filament > max_plate_filaments) {
-            // On a protocol that renumbers (protocol_requires_dense_tool_numbering) the plate's
-            // filaments were already compacted to a dense range before slicing, so the highest
-            // index IS the count and there is nothing left to renumber -- telling the user to
-            // renumber would be advice that cannot work. Anywhere else the limit is on the
-            // filament NUMBER, which renumbering can fix without dropping a filament.
-            if (printer_requires_dense_tool_numbering(printer_config))
-                return {(boost::format(L("This plate uses %1% filaments, but this printer can only print %2% filaments on one "
-                                         "plate. Reduce the number of filaments used on this plate."))
-                         % highest_used_filament % max_plate_filaments).str()};
-            return {(boost::format(L("This plate uses filament %1%, but this printer can only address %2% filaments on one plate. "
-                                     "Reduce the number of filaments used on this plate, or renumber them so they fit within the "
-                                     "first %2%."))
-                     % highest_used_filament % max_plate_filaments).str()};
-        }
+        if (physical_extruders.size() > namespace_size)
+            return {(boost::format(L("This plate uses %1% filaments, but this printer can only print %2% filaments on one "
+                                     "plate. Reduce the number of filaments used on this plate."))
+                     % physical_extruders.size() % namespace_size).str()};
     }
 
     if (nozzles < 2 && extruders.size() > 1) {

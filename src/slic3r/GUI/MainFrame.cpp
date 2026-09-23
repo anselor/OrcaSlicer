@@ -2215,7 +2215,9 @@ wxBoxSizer* MainFrame::create_side_tools()
                 // user will start the job from the printer's own screen instead, so it must not
                 // ask for any of them. Printers that declare nothing keep the plain send dialog
                 // under "Print", which already offers both actions -- their menu is unchanged.
-                if (!device_print_spec(filament_mapping_protocol_of(printer_config_for_menu())).empty()) {
+                if (const DynamicPrintConfig& cfg = printer_config_for_menu();
+                    !device_print_spec(filament_mapping_protocol_of(cfg),
+                                       effective_map_delivery(filament_mapping_protocol_of(cfg), reported_changer_of(cfg))).empty()) {
                     SideButton* upload_gcode_btn = new SideButton(p, _L("Upload"), "");
                     upload_gcode_btn->SetCornerRadius(0);
                     upload_gcode_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {

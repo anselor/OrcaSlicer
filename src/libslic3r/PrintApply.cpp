@@ -1211,9 +1211,10 @@ Print::ApplyStatus Print::apply(const Model &model_in, DynamicPrintConfig new_fu
     // filaments by this same space. Renumbering here is what makes all of them dense at once.
     // Inert for every printer that doesn't ask: no compaction is built, and a plate already using
     // a dense prefix produces an identity compaction that copies nothing.
-    m_filament_compaction = printer_requires_dense_tool_numbering(new_full_config)
-                                ? build_filament_compaction(model_in, new_full_config)
-                                : FilamentCompaction();
+    const size_t nozzle_count = new_full_config.option<ConfigOptionFloats>("nozzle_diameter", true)->values.size();
+    m_filament_compaction     = device_resolves_filament_mapping(new_full_config)
+                                    ? build_filament_compaction(model_in, new_full_config, filament_namespace_size(new_full_config, nozzle_count))
+                                    : FilamentCompaction();
     const bool compacting = !m_filament_compaction.slot_of_tool.empty();
     if (compacting) {
         // Model::operator= is assign_copy, which preserves object IDs -- apply's model diffing

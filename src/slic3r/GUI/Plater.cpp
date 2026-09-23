@@ -19875,9 +19875,12 @@ static std::vector<int> device_wire_filament_map(const DynamicPrintConfig& print
                                                  const DynamicPrintConfig& full_config,
                                                  const std::vector<int>&   map_1based)
 {
-    if (!printer_requires_dense_tool_numbering(printer_config))
-        return map_1based;
     const std::vector<int> slots = used_filament_slots(model, full_config);
+    // Same rule as Print::apply (build_filament_compaction): only a plate reaching past the
+    // printer's T namespace was renumbered, so only then are the picks re-keyed.
+    const size_t nozzle_count = full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
+    if (slots.empty() || size_t(slots.back()) + 1 <= filament_namespace_size(printer_config, nozzle_count))
+        return map_1based;
     std::vector<int>       out(slots.size(), 0);
     for (size_t tool = 0; tool < slots.size(); ++tool)
         if (size_t(slots[tool]) < map_1based.size())
@@ -19953,7 +19956,6 @@ static DevicePrintJobInfo build_device_print_job_info(PartPlate*                
         const FilamentInventory& inventory  = current_inventory_for_preset(active_printer_session().profile(), store, tool_count);
         for (const auto& tool : inventory.tools)
             job.slot_names.push_back(tool.empty() ? std::string() : tool[0].name);
-        job.changer_dialect = inventory.dialect;
     }
 
     // line_width is a percentage of the nozzle diameter; the screen sends the resolved value.
@@ -20045,8 +20047,16 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool up
 
         // Orca: a profile that DECLARES what its printer's screen offers at print start gets the
         // standard data-driven dialog instead of the plain one; every other printer is untouched.
+        // The vendor's options and the effective delivery (the reported changer if any) as the
+        // slice saw them: the dialog re-reads the printer and may re-seed both, and the send
+        // below compares against these.
+        const FilamentMappingProtocol vendor_protocol = physical_printer_config != nullptr
+                                                            ? filament_mapping_protocol_of(*physical_printer_config)
+                                                            : FilamentMappingProtocol::fmpNone;
+        const std::string sliced_changer = physical_printer_config != nullptr ? reported_changer_of(*physical_printer_config) : std::string();
+        const MapDelivery map_delivery   = effective_map_delivery(vendor_protocol, sliced_changer);
         const DevicePrintSpec device_spec = (physical_printer_config != nullptr && !upload_only)
-                                                ? device_print_spec(filament_mapping_protocol_of(*physical_printer_config))
+                                                ? device_print_spec(vendor_protocol, map_delivery)
                                                 : DevicePrintSpec();
         const int  device_plate_idx  = plate_idx == PLATE_ALL_IDX ? get_partplate_list().get_curr_plate_index() : resolved_plate_idx;
         PartPlate* device_plate      = get_partplate_list().get_plate(device_plate_idx);
@@ -20196,24 +20206,18 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool up
                     // "Unknown command" on the printer.
                     if (this->p->update_restart_background_process(false, false) & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
                         return;
-                    // A Klipper-changer slice needs a changer to still be there, and a
-                    // vendor-protocol slice must not meet one that appeared since (a ZR that gained
-                    // openACE): either way the file no longer matches the machine, so refuse and ask
-                    // for a re-slice after a sync.
+                    // The dialog just re-read the printer. A changer that appeared or vanished since
+                    // the slice changes the delivery the file was sliced for (namespace, numbering),
+                    // so refuse and ask for a re-slice after a sync.
                     {
-                        const FilamentMappingProtocol protocol = filament_mapping_protocol_of(*physical_printer_config);
-                        FilamentInventories           store;
-                        const size_t                  tool_count = resolve_active_printer_tool_count(store);
-                        const std::string             reported   = current_inventory_for_preset(active_printer_session().profile(), store, tool_count).dialect;
-                        const bool                    expects_changer = protocol == FilamentMappingProtocol::fmpKlipperChanger;
-                        if (expects_changer != !reported.empty()) {
-                            BOOST_LOG_TRIVIAL(warning) << "send_gcode_legacy: sliced for protocol " << int(protocol)
-                                                       << " but the printer reports changer '" << reported << "'; send aborted";
-                            MessageDialog(this, expects_changer
-                                                    ? _L("This plate was sliced for a Klipper filament changer, but the printer no longer "
-                                                         "reports one. Sync the printer materials and slice again.")
-                                                    : _L("The printer now reports a Klipper filament changer this plate was not sliced for. "
-                                                         "Sync the printer materials and slice again."),
+                        FilamentInventories store;
+                        const size_t        tool_count   = resolve_active_printer_tool_count(store);
+                        const std::string   live_changer = current_inventory_for_preset(active_printer_session().profile(), store, tool_count).dialect;
+                        if (live_changer != sliced_changer) {
+                            BOOST_LOG_TRIVIAL(warning) << "send_gcode_legacy: sliced with changer '" << sliced_changer
+                                                       << "' but the printer reports '" << live_changer << "'; send aborted";
+                            MessageDialog(this, _L("The printer's filament changer differs from the one this plate was sliced for. "
+                                                   "Sync the printer materials and slice again."),
                                           _L("Send print"), wxOK | wxICON_WARNING).ShowModal();
                             return;
                         }
@@ -20225,15 +20229,15 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool up
                     job.filament_map_1based = device_wire_filament_map(*physical_printer_config, this->model(),
                                                                        wxGetApp().preset_bundle->full_config(),
                                                                        device_dlg->filament_map());
-                    std::string start_script = build_device_start_script(filament_mapping_protocol_of(*physical_printer_config),
+                    std::string start_script = build_device_start_script(vendor_protocol, map_delivery,
                                                                           PRINT_HOST_UPLOADED_FILENAME_PLACEHOLDER, job);
                     if (!start_script.empty())
                         upload_job.upload_data.extended_info["start_script"] = start_script;
                 }
             }
-            // No-silent-drop guard: a device-owned-protocol printer must never start a print with a
+            // No-silent-drop guard: a printer with a map delivery must never start a print with a
             // filament map the user picked but that never reached the printer.
-            if (device_owned_mapping_protocol(*physical_printer_config)) {
+            if (map_delivery != MapDelivery::none) {
                 if (upload_job.upload_data.extended("start_script").empty()) {
                     // Dialog skipped, or protocol has no start-script dialect wired in yet -- don't
                     // auto-start with an unmapped/identity table; let the user map from the

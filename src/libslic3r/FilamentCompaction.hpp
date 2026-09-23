@@ -24,7 +24,7 @@ class DynamicPrintConfig;
 // consumer downstream indexes filaments by that same space, so all of them become dense by
 // construction and none of them needs to know this exists.
 //
-// Gated on protocol_requires_dense_tool_numbering(): printers without a native protocol never
+// Gated on the namespace (build_filament_compaction): printers that do not resolve the map never
 // build a compaction, so nothing below runs for them.
 //
 // Mixed-colour filaments are virtual slots: ToolOrdering resolves each to its component
@@ -50,8 +50,10 @@ struct FilamentCompaction
 // order and the widget's row order cannot drift.
 std::vector<int> used_filament_slots(const Model& model, const DynamicPrintConfig& config);
 
-// is_identity() unless the used slots are something other than a dense prefix (0..n-1).
-FilamentCompaction build_filament_compaction(const Model& model, const DynamicPrintConfig& config);
+// is_identity() unless the plate's highest used slot reaches past the printer's T namespace
+// (filament_namespace_size): then the used slots are packed to 0..n-1. Renumbering is safe on
+// every device-resolved printer because Orca delivers the map at print time in those numbers.
+FilamentCompaction build_filament_compaction(const Model& model, const DynamicPrintConfig& config, size_t namespace_size);
 
 // Renumber every filament reference in the model: object / volume / layer-range configs,
 // multi-material painting, and the plate's custom tool changes. References to slots the
