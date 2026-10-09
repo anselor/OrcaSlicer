@@ -51,6 +51,8 @@
 #include <thread>
 #include <vector>
 #include <utility>
+#include <cstddef>
+#include <cstdio>
 
 namespace {
 

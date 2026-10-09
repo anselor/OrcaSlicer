@@ -2,6 +2,7 @@
 #define slic3r_FilamentCompaction_hpp_
 
 #include <vector>
+#include <cstddef>
 
 namespace Slic3r {
 
