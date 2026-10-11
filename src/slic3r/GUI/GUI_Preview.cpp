@@ -730,7 +730,14 @@ void Preview::load_print_as_fff(bool keep_z_range, bool only_gcode)
         wxGetApp().plater()->model().get_curr_plate_custom_gcodes().gcodes : m_gcode_result->custom_gcode_per_print_z;
     std::vector<std::string> color_print_colors;
     if (!color_print_values.empty()) {
-        color_print_colors = wxGetApp().plater()->get_colors_for_color_print(m_gcode_result);
+        // Orca: this palette is indexed by the G-CODE's numbering, not the project's: the
+        // processor seeds m_extruder_colors[i] = i over the SLICED filament count and puts each
+        // colour-change colour after them, at m_extruder_offsets.size() + n (GCodeProcessor).
+        // On a compacted plate (FilamentCompaction) the project's colour list is neither in that
+        // order nor of that length, so both halves would land on the wrong entries -- the Filament
+        // view paints its toolpaths from here while its legend reads the tool colours, and the two
+        // disagreed. Hand it the same tool colours.
+        color_print_colors = wxGetApp().plater()->get_colors_for_color_print(m_gcode_result, tool_colors);
         color_print_colors.push_back("#808080"); // gray color for pause print or custom G-code
     }
 

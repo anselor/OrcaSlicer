@@ -22117,9 +22117,11 @@ const std::vector<std::vector<wxColour>>& Plater::get_filament_gradient_ramps() 
 /* Get vector of colors used for rendering of a Preview scene in "Color print" mode
  * It consists of extruder colors and colors, saved in model.custom_gcode_per_print_z
  */
-std::vector<std::string> Plater::get_colors_for_color_print(const GCodeProcessorResult* const result) const
+std::vector<std::string> Plater::get_colors_for_color_print(const GCodeProcessorResult* const      result,
+                                                            std::optional<std::vector<std::string>> filament_colors) const
 {
-    std::vector<std::string> colors = get_extruder_colors_from_plater_config(result);
+    std::vector<std::string> colors = filament_colors.has_value() ? std::move(*filament_colors)
+                                                                  : get_extruder_colors_from_plater_config(result);
 
     if (wxGetApp().is_gcode_viewer() && result != nullptr) {
         for (const CustomGCode::Item& code : result->custom_gcode_per_print_z) {
