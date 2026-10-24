@@ -51,6 +51,13 @@ bool        dialect_supports_push(Dialect dialect);
 std::string dialect_name(Dialect dialect);
 std::vector<std::string> afc_push_scripts(const IPrinterAgent::FilamentSlotInfo& info);
 std::string              happy_hare_push_script(const IPrinterAgent::FilamentSlotInfo& info);
+// Print-start scripts: reset the map, assign each used tool, then SD start. tool_to_slot_1based:
+// index = 0-based tool, value = 1-based slot, 0 = unassigned. Empty when a used AFC slot has no name.
+std::string afc_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based,
+                                     const std::vector<std::string>& slot_names);
+std::string happy_hare_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based);
+// SD start with OPENACE_MAP="[[sliced,virtual],...]" (0-based); no reset, the job map ends with the job.
+std::string openace_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based);
 // Highest T<n> + 1 in /printer/gcode/help; not the count, since toolchanger T0..T3 have no help
 // text and are not listed. 0 = none found.
 int tool_count_from_gcode_help(const nlohmann::json& help);

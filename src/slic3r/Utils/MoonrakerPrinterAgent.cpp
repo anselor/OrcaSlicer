@@ -199,6 +199,52 @@ std::string happy_hare_push_script(const IPrinterAgent::FilamentSlotInfo& info)
     return "MMU_GATE_MAP GATE=" + std::to_string(info.slot) + " MATERIAL=" + info.type + " COLOR=" + rgb_of(info.color_rgba);
 }
 
+static std::string sd_print_start(const std::string& filename)
+{
+    return "SDCARD_PRINT_FILE FILENAME=\"" + filename + "\"";
+}
+
+std::string afc_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based,
+                                     const std::vector<std::string>& slot_names)
+{
+    // SET_MAP swaps the lane that held T<n> with the one taking it, so assigning in ascending
+    // tool order after a reset settles to exactly the requested map.
+    std::string script = "RESET_AFC_MAPPING\n";
+    for (size_t tool = 0; tool < tool_to_slot_1based.size(); ++tool) {
+        const int slot = tool_to_slot_1based[tool];
+        if (slot <= 0)
+            continue;
+        if (size_t(slot) > slot_names.size() || slot_names[slot - 1].empty())
+            return {};
+        script += "SET_MAP LANE=" + slot_names[slot - 1] + " MAP=T" + std::to_string(tool) + "\n";
+    }
+    return script + sd_print_start(filename);
+}
+
+std::string openace_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based)
+{
+    std::string pairs;
+    for (size_t tool = 0; tool < tool_to_slot_1based.size(); ++tool) {
+        const int slot = tool_to_slot_1based[tool];
+        if (slot <= 0)
+            continue;
+        pairs += (pairs.empty() ? "" : ",") + std::string("[") + std::to_string(tool) + "," + std::to_string(slot - 1) + "]";
+    }
+    return sd_print_start(filename) + " OPENACE_MAP=\"[" + pairs + "]\"";
+}
+
+std::string happy_hare_mapping_start_script(const std::string& filename, const std::vector<int>& tool_to_slot_1based)
+{
+    std::string script = "MMU_TTG_MAP RESET=1\n";
+    for (size_t tool = 0; tool < tool_to_slot_1based.size(); ++tool) {
+        const int slot = tool_to_slot_1based[tool];
+        if (slot <= 0)
+            continue;
+        script += "MMU_TTG_MAP TOOL=" + std::to_string(tool) + " GATE=" + std::to_string(slot - 1) + "\n";
+    }
+    return script + sd_print_start(filename);
+}
+
 int tool_count_from_gcode_help(const nlohmann::json& help)
 {
     int highest = -1;
