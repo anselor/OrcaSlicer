@@ -9484,7 +9484,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 partplate_list.reset_size(current_width + Bed3D::Axes::DefaultTipRadius, current_depth + Bed3D::Axes::DefaultTipRadius, current_height, false);
                             }
                             project_filament_count = config_loaded.option<ConfigOptionStrings>("filament_colour")->size();
-                            partplate_list.load_from_3mf_structure(plate_data, project_filament_count);
+                            // The loaded project's nozzle count: its printer preset is applied only later below.
+                            int project_nozzle_count = 1;
+                            if (const ConfigOptionFloats* project_nozzle_diameter = config_loaded.option<ConfigOptionFloats>("nozzle_diameter"))
+                                project_nozzle_count = (int) project_nozzle_diameter->size();
+                            partplate_list.load_from_3mf_structure(plate_data, project_filament_count, project_nozzle_count);
                             partplate_list.update_slice_context_to_current_plate(background_process);
                             this->preview->update_gcode_result(partplate_list.get_current_slice_result());
                             release_PlateData_list(plate_data);
