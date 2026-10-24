@@ -68,7 +68,7 @@ FilamentInventoryEditor::FilamentInventoryEditor(wxWindow* parent, const std::st
 
     {
         m_extruder_count = printer_preset ? addressable_tool_count_of(*printer_preset) : 1;
-        const bool memm  = printer_preset && m_extruder_count > 1 && !device().dialect.empty();
+        const bool memm  = printer_preset && m_extruder_count > 1 && !reported_changer_of(printer_preset->config).empty();
         SlotGridOptions opts;
         opts.show_extruder_row     = memm;
         opts.show_extruder_on_tile = memm;
